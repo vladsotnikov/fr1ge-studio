@@ -1,0 +1,10 @@
+name = "fr1ge-studio-license"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# KV binding for license keys.
+# Create the namespace once: `wrangler kv namespace create VSS_KEYS`
+# Then put the returned ID below.
+[[kv_namespaces]]
+binding = "VSS_KEYS"
+id = "170e8655079a498fa5be1ca22ae8db5a"

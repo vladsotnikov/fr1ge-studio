@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <title>Fr1Ge STUDIO — License</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.5 -apple-system, "Segoe UI", sans-serif;
+      color: #13212f;
+      background:
+        radial-gradient(circle at 15% -10%, #f8d4b4 0, transparent 40%),
+        radial-gradient(circle at 90% 100%, #c7def8 0, transparent 35%),
+        #eef3f8;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-app-region: drag;
+    }
+    .card {
+      width: 360px;
+      background: #fdfefe;
+      border: 1px solid #bdd0e0;
+      border-radius: 16px;
+      padding: 28px 26px;
+      box-shadow: 0 6px 30px rgba(11, 92, 171, .12);
+      -webkit-app-region: no-drag;
+    }
+    .kicker {
+      margin: 0;
+      font-size: 11px;
+      letter-spacing: .14em;
+      color: #0b5cab;
+      font-weight: 700;
+    }
+    h1 {
+      margin: 6px 0 4px;
+      font-size: 22px;
+    }
+    p.muted {
+      margin: 0 0 18px;
+      color: #4e6479;
+      font-size: 13px;
+    }
+    label {
+      display: block;
+      color: #4e6479;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 11px 13px;
+      border: 1px solid #bdd0e0;
+      border-radius: 10px;
+      font: inherit;
+      color: #13212f;
+      background: #fff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    input:focus { outline: 2px solid #0b5cab; outline-offset: -1px; }
+    button {
+      width: 100%;
+      margin-top: 14px;
+      padding: 11px 14px;
+      border-radius: 10px;
+      border: 1px solid #074a8a;
+      background: #0b5cab;
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+      transition: filter .12s ease;
+    }
+    button:hover { filter: brightness(1.08); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .status {
+      margin-top: 10px;
+      font-size: 13px;
+      min-height: 18px;
+    }
+    .status.error { color: #dc2626; }
+    .status.ok { color: #15803d; }
+    .status.loading { color: #4e6479; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img src="icon.png" alt="Fr1Ge" style="width:64px;height:64px;border-radius:14px;display:block;margin:0 auto 12px;box-shadow:0 4px 16px rgba(99,102,241,.3);">
+    <p class="kicker" style="text-align:center;">FR1GE Studio</p>
+    <h1 style="text-align:center;">Ліцензійний ключ</h1>
+    <p class="muted" style="text-align:center;">Введи свій персональний ключ для доступу.</p>
+    <label for="key">Ключ</label>
+    <input id="key" type="text" placeholder="vss-xxxx-xxxx-xxxx" autofocus>
+    <button id="submit">Активувати</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <script>
+    const keyInput = document.getElementById("key");
+    const submitBtn = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+
+    function setStatus(msg, kind = "") {
+      statusEl.textContent = msg;
+      statusEl.className = "status " + kind;
+    }
+
+    async function validate() {
+      const key = keyInput.value.trim();
+      if (!key) {
+        setStatus("Введи ключ", "error");
+        return;
+      }
+      submitBtn.disabled = true;
+      setStatus("Перевіряю ключ…", "loading");
+      try {
+        const result = await window.license.validate(key);
+        if (result.valid) {
+          setStatus("✅ Ключ прийнято. Запускаю аппку…", "ok");
+          setTimeout(() => window.license.accept(), 600);
+        } else {
+          setStatus(`❌ ${result.error || "Ключ неправильний"}`, "error");
+          submitBtn.disabled = false;
+        }
+      } catch (e) {
+        setStatus(`❌ Помилка: ${e.message}`, "error");
+        submitBtn.disabled = false;
+      }
+    }
+
+    submitBtn.addEventListener("click", validate);
+    keyInput.addEventListener("keydown", (e) => { if (e.key === "Enter") validate(); });
+  </script>
+</body>
+</html>

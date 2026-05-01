@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Відео Автопілот</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app">
+    <div class="top-tabs">
+      <button id="tabAutopilot" class="tab-btn active" type="button">Автопілот</button>
+      <button id="tabCutter" class="tab-btn" type="button">Нарізка</button>
+    </div>
+
+    <header class="hero">
+      <p class="kicker" id="heroKicker">FR1GE Studio</p>
+      <h1 id="heroTitle">Відео Автопілот</h1>
+      <p id="heroSubtitle">Озвучка -> контекст -> відео/картинки. Завантаж аудіо, обери джерело контенту, отримай автопідбір медіа та готовий змонтований ролик.</p>
+    </header>
+
+    <section id="autopilotPanel">
+    <section class="card">
+      <div class="card-header">
+        <h2>Вхідні дані</h2>
+      </div>
+
+      <!-- Група 1: Аудіо -->
+      <div class="input-group">
+        <div class="input-group-label">
+          <span class="ig-icon">🎙</span> Аудіо та мова
+        </div>
+        <div class="grid grid-3">
+          <label class="field-label">
+            Озвучка (audio)
+            <input id="audioFile" type="file" accept="audio/*">
+          </label>
+          <label class="field-label">
+            Мова озвучки
+            <select id="language">
+              <option value="">Автовизначення</option>
+              <option value="uk">Українська (uk)</option>
+              <option value="en">English (en)</option>
+              <option value="ru">Русский (ru)</option>
+              <option value="pl">Polski (pl)</option>
+              <option value="de">Deutsch (de)</option>
+              <option value="fr">Français (fr)</option>
+              <option value="es">Español (es)</option>
+              <option value="it">Italiano (it)</option>
+              <option value="pt">Português (pt)</option>
+              <option value="tr">Türkçe (tr)</option>
+            </select>
+          </label>
+          <label class="field-label">
+            Мова фокусу
+            <select id="focusLanguage">
+              <option value="uk" selected>Українська</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+        </div>
+        <div class="grid grid-2col-key">
+          <label class="field-label">
+            OpenAI API key
+            <input id="openaiKey" type="password" placeholder="sk-...">
+          </label>
+          <label class="field-label">
+            Нарізка озвучки
+            <select id="splitMode">
+              <option value="context">По контексту</option>
+              <option value="fixed">По кількості секунд</option>
+            </select>
+          </label>
+          <label id="fixedSecondsWrap" class="field-label hidden">
+            Секунд у фрагменті
+            <input id="fixedSeconds" type="number" min="1" max="30" step="1" value="4">
+          </label>
+        </div>
+      </div>
+
+      <!-- Група 2: Медіа -->
+      <div class="input-group">
+        <div class="input-group-label">
+          <span class="ig-icon">🎬</span> Медіа джерело
+        </div>
+        <div class="grid">
+          <label class="field-label">
+            Джерело
+            <select id="sourceMode" class="hidden">
+              <option value="stock">Стоки</option>
+              <option value="local" selected>Файли з комп'ютера</option>
+            </select>
+            <div class="static-value">Файли з комп'ютера</div>
+          </label>
+          <label class="field-label">
+            Тип контенту
+            <select id="mediaType">
+              <option value="both">Відео + картинки</option>
+              <option value="video">Тільки відео</option>
+              <option value="image">Тільки картинки</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="stockOptions" class="grid">
+          <label class="field-label">
+            Провайдер стоків
+            <select id="stockProvider">
+              <option value="all" selected>Всі безкоштовні (рекомендовано)</option>
+              <option value="pexels">Тільки Pexels</option>
+              <option value="pixabay">Тільки Pixabay</option>
+            </select>
+          </label>
+          <label class="field-label">
+            Режим підбору
+            <select id="visionMode">
+              <option value="turbo_no_vision" selected>Без Vision API (швидко)</option>
+              <option value="no_vision">Vision CV (безкоштовно)</option>
+              <option value="vision_api">Vision API (OpenAI)</option>
+            </select>
+          </label>
+          <label id="visionVerifyVideoWrap" class="field-label hidden">
+            <input id="visionVerifyAllVideo" type="checkbox" checked>
+            Перевіряти всі відео (Vision API)
+          </label>
+          <label id="visionVerifyImageWrap" class="field-label hidden">
+            <input id="visionVerifyAllImage" type="checkbox">
+            Перевіряти всі фото (Vision API)
+          </label>
+          <label class="field-label">
+            <input id="allowAiFallback" type="checkbox">
+            Дозволити AI-генерацію (тільки fallback)
+          </label>
+          <details class="stock-keys">
+            <summary>Ключі безкоштовних стоків</summary>
+            <div class="stock-keys-grid">
+              <label class="field-label">
+                Pexels API key
+                <input id="pexelsKey" type="password" placeholder="pexels-api-key">
+              </label>
+              <label class="field-label">
+                Pixabay API key
+                <input id="pixabayKey" type="password" placeholder="pixabay-api-key">
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <div id="localOptions" class="grid hidden">
+          <input id="localAnalyzeMode" type="hidden" value="cv">
+          <div>
+            <div class="label-like">Локальні медіафайли</div>
+            <div class="local-file-actions">
+              <button type="button" class="local-btn" id="addLocalFilesBtn">+ Файли</button>
+              <button type="button" class="local-btn" id="addLocalFolderBtn">+ Папка</button>
+              <button type="button" class="local-btn local-btn-clear" id="clearLocalFilesBtn">Очистити</button>
+            </div>
+            <input id="localFiles" type="file" accept="image/*,video/*" multiple class="hidden">
+            <input id="localFolders" type="file" accept="image/*,video/*" multiple webkitdirectory directory class="hidden">
+            <div id="localFilesSummary" class="muted local-summary">Файлів поки не додано</div>
+          </div>
+
+          <div id="blipSetupCard" class="local-analyze-card" style="grid-column: 1 / -1;">
+            <strong>🧠 Локальний AI-аналіз (BLIP)</strong>
+            <span class="muted" id="blipSetupStatus">Перевірка статусу...</span>
+            <div id="blipSetupActions" class="local-file-actions hidden">
+              <button type="button" class="local-btn" id="blipInstallBtn">Завантажити BLIP (~1.5GB)</button>
+            </div>
+            <div id="blipSetupProgress" class="hidden" style="margin-top: 8px;">
+              <div style="background: #d2e0eb; border-radius: 6px; height: 8px; overflow: hidden;">
+                <div id="blipSetupProgressBar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s;"></div>
+              </div>
+              <div id="blipSetupProgressLog" class="muted" style="font-size: 12px; margin-top: 6px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Група 3: Монтаж -->
+      <details class="montage-settings input-group-details">
+        <summary>
+          <span class="ig-icon">✂️</span> Налаштування монтажу
+          <span class="expand-arrow">›</span>
+        </summary>
+        <div class="montage-inner">
+          <div class="grid">
+            <label class="field-label">
+              Профіль монтажу
+              <select id="montagePreset">
+                <option value="dynamic" selected>Dynamic (помітний)</option>
+                <option value="smooth">Smooth (мʼякий)</option>
+                <option value="aggressive">Aggressive (сильний)</option>
+              </select>
+            </label>
+            <label class="field-label">
+              Стиль анімації картинок
+              <select id="imageAnimStyle">
+                <option value="combo" selected>Combo (random)</option>
+                <option value="zoom">Zoom</option>
+                <option value="shake">Shake</option>
+                <option value="drift">Drift/Pan</option>
+              </select>
+            </label>
+          </div>
+          <div class="grid">
+            <label class="field-label">
+              Сила анімації
+              <input id="imageAnimStrength" type="range" min="1" max="3" step="1" value="2">
+            </label>
+            <label class="field-label">
+              Пак переходів
+              <select id="transitionPack">
+                <option value="dynamic" selected>Dynamic</option>
+                <option value="smooth">Smooth</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+            </label>
+          </div>
+          <div class="grid">
+            <label class="field-label">
+              Тривалість переходу (сек)
+              <input id="transitionDuration" type="number" min="0.08" max="0.8" step="0.02" value="0.26">
+            </label>
+            <label class="field-label checkbox-label">
+              <input id="subtitlesEnabled" type="checkbox" checked>
+              Автосубтитри (вшити у відео)
+            </label>
+          </div>
+          <div class="grid">
+            <label class="field-label">
+              Проф монтаж
+              <select id="proMontageMode">
+                <option value="off">Вимкнено</option>
+                <option value="auto" selected>Авто</option>
+                <option value="intense">Інтенсивно</option>
+              </select>
+            </label>
+            <label class="field-label">
+              Щільність вставок
+              <select id="proInsertDensity">
+                <option value="low">Низька</option>
+                <option value="medium" selected>Середня</option>
+                <option value="high">Висока</option>
+              </select>
+            </label>
+          </div>
+          <div class="inserts-grid">
+            <label class="insert-toggle">
+              <input id="proInsertTitle" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>Title</strong>
+                <span class="muted">«THE TRUTH WAS HIDDEN»</span>
+              </span>
+            </label>
+            <label class="insert-toggle">
+              <input id="proInsertNumber" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>Числа</strong>
+                <span class="muted">«70% / USDA PROJECTION»</span>
+              </span>
+            </label>
+            <label class="insert-toggle">
+              <input id="proInsertDocument" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>Document</strong>
+                <span class="muted">«FORECLOSURE NOTICE»</span>
+              </span>
+            </label>
+            <label class="insert-toggle">
+              <input id="proInsertTimeline" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>Timeline</strong>
+                <span class="muted">«OCTOBER 2025»</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertPhotoFrame" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>🖼 Photo Frame</strong>
+                <span class="muted">Фото у рамці по центру</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertSplitScreen" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>⬛⬜ Split Screen</strong>
+                <span class="muted">Два кліпи поруч</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertBreakingNews" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>📡 Breaking News</strong>
+                <span class="muted">Червона стрічка «BREAKING»</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertLocationStamp" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>📍 Location Stamp</strong>
+                <span class="muted">GPS-мітка локації</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertChapterCard" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>📖 Chapter Card</strong>
+                <span class="muted">Розділ при зміні теми</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertRedactedDoc" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>🔒 Redacted Doc</strong>
+                <span class="muted">Засекречений документ</span>
+              </span>
+            </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertTypewriter" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>⌨ Typewriter</strong>
+                <span class="muted">Друкований факт на картці</span>
+              </span>
+            </label>
+          </div>
+          <div class="grid">
+            <label class="field-label checkbox-label">
+              <input id="sfxEnabled" type="checkbox" checked>
+              Звукове оформлення вставок
+            </label>
+            <label class="field-label">
+              Гучність SFX
+              <input id="sfxVolume" type="number" min="0" max="1.5" step="0.05" value="0.85">
+            </label>
+          </div>
+          <div class="grid">
+            <label class="field-label">
+              Стиль звуків
+              <select id="sfxPack">
+                <option value="cinematic" selected>Cinematic (повний набір)</option>
+                <option value="subtle">Subtle (тонше)</option>
+                <option value="minimal">Minimal (тільки удари)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </details>
+
+      <!-- Дії -->
+      <div class="actions-block">
+        <div class="pipeline-row">
+          <div class="pipe-step">
+            <div class="pipe-step-num">1</div>
+            <button id="transcribeBtn" type="button" class="pipe-btn">Розпізнати озвучку</button>
+          </div>
+          <div class="pipe-arrow">›</div>
+          <div class="pipe-step">
+            <div class="pipe-step-num">2</div>
+            <div class="pipe-step-inner">
+              <button id="matchBtn" type="button" class="pipe-btn primary" disabled>Підібрати медіа</button>
+              <button id="rerollBtn" type="button" class="pipe-btn-icon" title="Перепідібрати">↻</button>
+            </div>
+          </div>
+          <div class="pipe-arrow">›</div>
+          <div class="pipe-step">
+            <div class="pipe-step-num">3</div>
+            <button id="renderBtn" type="button" class="pipe-btn accent" disabled>Змонтувати відео</button>
+          </div>
+        </div>
+        <div class="autopilot-row">
+          <button id="autopilotBtn" type="button" class="autopilot-btn">
+            <span class="autopilot-icon">⚡</span> Автопілот
+          </button>
+        </div>
+      </div>
+
+      <p id="status" class="status">Очікування дій</p>
+      <p id="themeInfo" class="status">Тема: не визначено</p>
+      <div id="renderResult" class="render-result empty">Готове змонтоване відео з'явиться тут</div>
+    </section>
+
+    <section class="card two-col">
+      <div>
+        <h2>2. Транскрипт</h2>
+        <div id="segments" class="segments empty">Сегментів поки немає</div>
+      </div>
+      <div>
+        <h2>3. Підібраний контент</h2>
+        <div id="matches" class="matches empty">Поки немає підбору</div>
+      </div>
+    </section>
+    </section>
+
+    <section id="montagePanel" class="hidden">
+      <section class="card">
+        <h2>МініМонтажер</h2>
+        <p class="muted">Окремий монтажний пайплайн: завантаж аудіо + пачку кліпів, натисни запуск, отримай готовий ролик.</p>
+
+        <div class="grid">
+          <label>
+            Озвучка для монтажу
+            <input id="miniAudioFile" type="file" accept="audio/*">
+          </label>
+          <label>
+            Кліпи для монтажу (кілька файлів)
+            <input id="miniClipsFiles" type="file" accept="video/*" multiple>
+          </label>
+        </div>
+
+        <div class="grid">
+          <label>
+            Роздільна здатність
+            <select id="miniResolution">
+              <option value="1280x720" selected>1280x720 (YouTube)</option>
+              <option value="1920x1080">1920x1080 (Full HD)</option>
+              <option value="1080x1920">1080x1920 (Shorts/Reels)</option>
+            </select>
+          </label>
+          <label>
+            Режим сцен
+            <select id="miniSceneMode">
+              <option value="auto" selected>Авто: сцени з транскрипту</option>
+              <option value="lines">Ручний: рядки нижче</option>
+            </select>
+          </label>
+        </div>
+
+        <label>
+          Тексти сцен (1 рядок = 1 сцена, опц.)
+          <textarea id="miniSceneLines" rows="6" placeholder="Сцена 1 текст...&#10;Сцена 2 текст..."></textarea>
+        </label>
+
+        <div class="actions">
+          <button id="miniRunBtn" type="button" class="accent">Запустити МініМонтажер</button>
+        </div>
+        <p id="miniStatus" class="status">Очікування дій</p>
+        <div id="miniRenderResult" class="render-result empty">Готове змонтоване відео (МініМонтажер) з'явиться тут</div>
+      </section>
+    </section>
+
+    <section id="cutterPanel" class="hidden">
+      <section class="card">
+        <div class="card-header">
+          <h2>Нарізка</h2>
+        </div>
+        <p class="muted">Поріж відео на шматки та отримай готові матеріали для свого відео.</p>
+
+        <!-- Група 1: Відеоджерело -->
+        <div class="input-group">
+          <div class="input-group-label">
+            <span class="ig-icon">🎬</span> Відеоджерело
+          </div>
+          <div class="grid">
+            <label class="field-label">
+              YouTube-посилання (опц.)
+              <input id="cutYoutubeUrl" type="url" placeholder="https://www.youtube.com/watch?v=...">
+            </label>
+            <label class="field-label">
+              Або локальний відеофайл
+              <input id="cutVideoFile" type="file" accept="video/*">
+            </label>
+          </div>
+        </div>
+
+        <!-- Група 2: Параметри нарізки -->
+        <div class="input-group">
+          <div class="input-group-label">
+            <span class="ig-icon">✂️</span> Параметри нарізки
+          </div>
+          <div class="grid grid-3">
+            <label class="field-label">
+              Пресет довжини
+              <select id="cutSegmentPreset">
+                <option value="5">5 секунд</option>
+                <option value="8" selected>8 секунд</option>
+                <option value="10">10 секунд</option>
+                <option value="custom">Своя довжина</option>
+              </select>
+            </label>
+            <label id="cutSegmentCustomWrap" class="field-label hidden">
+              Своя довжина (сек)
+              <input id="cutSegmentSeconds" type="number" min="2" max="120" step="1" value="8">
+            </label>
+            <label class="field-label">
+              Аналіз сцени для назв
+              <select id="cutCaptionMode">
+                <option value="blip" selected>BLIP + OCR (краще)</option>
+                <option value="ocr">Тільки OCR (швидше)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- Група 3: Іменування -->
+        <div class="input-group">
+          <div class="input-group-label">
+            <span class="ig-icon">🏷</span> Іменування файлів
+          </div>
+          <div class="grid">
+            <label class="field-label">
+              Назва/префікс проєкту (опц.)
+              <input id="cutProjectLabel" type="text" placeholder="Напр. true-crime-ep01">
+            </label>
+            <label class="field-label">
+              Режим назв кліпів
+              <select id="cutNamingMode">
+                <option value="auto" selected>Автоназви</option>
+                <option value="time">Тільки час + префікс</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <p class="muted">Після нарізки можна одним кліком зберегти весь пакет кліпів у zip або вибрати, куди його покласти на комп'ютері.</p>
+
+        <div class="actions-block">
+          <div class="autopilot-row">
+            <button id="cutRunBtn" type="button" class="autopilot-btn">
+              <span class="autopilot-icon">✂️</span>
+              <span>Нарізати відео</span>
+            </button>
+          </div>
+        </div>
+        <p id="cutStatus" class="status">Очікування дій</p>
+        <div id="cutResults" class="render-result empty">Готові нарізані кліпи з'являться тут</div>
+      </section>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# Electron build output
+dist/
+
+# render output and temp work
+outputs/
+tmp/
+.venv-blip
+.venv-blip/
+
+# os
+.DS_Store
+__MACOSX/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# secrets / credentials
+.env
+.env.local
+*.env
+Fr1Ge-ADMIN-PASSWORD.txt
+
+# IDE / Claude state
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
