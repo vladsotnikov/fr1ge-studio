@@ -6194,6 +6194,10 @@ app.get("/api/blip/status", async (_req, res) => {
 });
 
 app.post("/api/blip/install", async (req, res) => {
+  // Install can take 5-15 min. Stop Node from killing the socket on us.
+  req.setTimeout(0);
+  res.setTimeout(0);
+
   if (blipInstallState.running) {
     return res.status(409).json({ error: "Установка вже йде, перевір прогрес через /api/blip/status" });
   }
@@ -6207,6 +6211,9 @@ app.post("/api/blip/install", async (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
+  // Heartbeat ping every 15s prevents proxies/timeouts on long pip install.
+  const heartbeat = setInterval(() => { try { res.write(": ping\n\n"); } catch {} }, 15000);
+  res.on("close", () => clearInterval(heartbeat));
 
   const send = (event) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
