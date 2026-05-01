@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fr1Ge STUDIO — Встановлення</title>
+  <meta name="description" content="Fr1Ge STUDIO — десктоп-аппка для автоматичного відеомонтажу під озвучку.">
+  <link rel="icon" type="image/png" href="icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="page">
+    <!-- ── HERO ───────────────────────────────────────────────────────── -->
+    <header class="hero">
+      <img src="icon.png" alt="Fr1Ge" class="hero-logo">
+      <p class="kicker">FR1GE Studio</p>
+      <h1>Fr1Ge <span class="accent">STUDIO</span></h1>
+      <p class="tagline">Завантаж аудіо. Отримай готовий змонтований ролик.</p>
+
+      <!-- Detected-platform CTA fills in via JS; fallback shows both. -->
+      <div id="primaryCta" class="cta-row">
+        <a class="btn primary" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank">
+          <span>Скачати останню версію</span>
+        </a>
+      </div>
+      <p class="tiny muted" id="detectedNote"></p>
+    </header>
+
+    <!-- ── DOWNLOADS ──────────────────────────────────────────────────── -->
+    <section class="card">
+      <h2>📥 Завантажити</h2>
+      <div class="download-grid">
+        <a class="dl-card" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="mac-arm">
+          <div class="dl-icon">🍎</div>
+          <div class="dl-body">
+            <strong>Mac (Apple Silicon)</strong>
+            <span>M1 / M2 / M3 / M4</span>
+            <span class="dl-file">Fr1Ge STUDIO-*-arm64.dmg</span>
+          </div>
+        </a>
+        <a class="dl-card" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="mac-intel">
+          <div class="dl-icon">🍎</div>
+          <div class="dl-body">
+            <strong>Mac (Intel)</strong>
+            <span>x86_64</span>
+            <span class="dl-file">Fr1Ge STUDIO-*-x64.dmg</span>
+          </div>
+        </a>
+        <a class="dl-card" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="win">
+          <div class="dl-icon">🪟</div>
+          <div class="dl-body">
+            <strong>Windows</strong>
+            <span>10 / 11, x64</span>
+            <span class="dl-file">Fr1Ge STUDIO-*.exe</span>
+          </div>
+        </a>
+      </div>
+      <p class="muted tiny">⚠️ Перед першим запуском потрібен ліцензійний ключ від адміністратора.</p>
+    </section>
+
+    <!-- ── MAC INSTALL ────────────────────────────────────────────────── -->
+    <section class="card" id="install-mac">
+      <h2>🍎 Встановлення на Mac</h2>
+      <ol class="steps">
+        <li>
+          <strong>Скачай</strong> відповідний DMG зверху (Apple Silicon або Intel — залежить від моделі).
+          <details class="hint">
+            <summary>Як дізнатись який у мене Mac?</summary>
+            <p>Apple Menu → <em>About This Mac</em>. Якщо у "Chip" написано <strong>M1/M2/M3/M4</strong> — бери Apple Silicon. Якщо <strong>Intel</strong> — бери Intel-версію.</p>
+          </details>
+        </li>
+        <li>
+          <strong>Подвійний клік</strong> на скачаний файл — відкриється вікно з аппкою.
+        </li>
+        <li>
+          <strong>Перетягни</strong> іконку <span class="emoji-icon">🟣</span> <em>Fr1Ge STUDIO</em> у папку <em>Applications</em>.
+        </li>
+        <li>
+          Йди в <em>Applications</em> → <strong>правий клік</strong> на Fr1Ge STUDIO → <strong>Open</strong>.
+          <details class="hint warn">
+            <summary>⚠️ macOS пише "невідомий розробник" — це нормально</summary>
+            <p>Аппка не підписана Apple-сертифікатом ($99/рік не платимо для приватного кола). Тому при першому запуску треба:</p>
+            <ul>
+              <li>Правий клік (або Ctrl+клік) на іконці аппки → <strong>Open</strong></li>
+              <li>Натиснути <strong>Open</strong> у попередженні системи</li>
+            </ul>
+            <p>Тільки перший раз. Далі можна запускати звичайним подвійним кліком.</p>
+          </details>
+        </li>
+        <li>
+          З'явиться <strong>splash з полем для ключа</strong> — введи свій ліцензійний ключ.
+          <small class="muted">Якщо нема ключа — попроси у адміністратора.</small>
+        </li>
+        <li>✅ Все. Аппка готова до роботи.</li>
+      </ol>
+    </section>
+
+    <!-- ── WIN INSTALL ────────────────────────────────────────────────── -->
+    <section class="card" id="install-win">
+      <h2>🪟 Встановлення на Windows</h2>
+      <ol class="steps">
+        <li><strong>Скачай</strong> Windows-інсталятор зверху.</li>
+        <li><strong>Подвійний клік</strong> на скачаний `.exe`.</li>
+        <li>
+          З'явиться попередження <strong>SmartScreen "Windows protected your PC"</strong>.
+          <details class="hint warn">
+            <summary>⚠️ Це нормально — як обійти</summary>
+            <ul>
+              <li>Натисни <strong>"More info"</strong></li>
+              <li>З'явиться кнопка <strong>"Run anyway"</strong> — тисни її</li>
+            </ul>
+            <p>Тільки перший раз.</p>
+          </details>
+        </li>
+        <li>Інсталятор покаже стандартний wizard — натисни <strong>"Install"</strong>.</li>
+        <li>Після встановлення з'явиться ярлик <strong>Fr1Ge STUDIO</strong> на робочому столі.</li>
+        <li>Запусти аппку → введи ліцензійний ключ у splash → готово.</li>
+      </ol>
+    </section>
+
+    <!-- ── BLIP (опціонально) ────────────────────────────────────────── -->
+    <section class="card" id="blip">
+      <h2>🧠 BLIP (локальний AI-аналіз)</h2>
+      <p>BLIP потрібен тільки якщо ти використовуєш <strong>"Файли з компʼютера"</strong> як джерело медіа і хочеш щоб AI підбирав найкращий кадр під кожен сегмент озвучки.</p>
+      <ol class="steps">
+        <li>У головному вікні Fr1Ge STUDIO зайди на вкладку <strong>Автопілот</strong></li>
+        <li>Обери джерело <strong>"Файли з компʼютера"</strong></li>
+        <li>Зверху побачиш картку <strong>"🧠 Локальний AI-аналіз (BLIP)"</strong></li>
+        <li>Натисни <strong>"Завантажити BLIP (~1.5GB)"</strong></li>
+        <li>Прогрес-бар покаже стани: Python → PyTorch → BLIP моделі. Це займе <strong>5-15 хв</strong> залежно від інтернету.</li>
+        <li>Готово — BLIP працює офлайн назавжди (не потребує перезавантаження після оновлення аппки).</li>
+      </ol>
+      <p class="muted tiny">Без BLIP працює: транскрипція, стоки, рендер монтажу, нарізка YouTube. BLIP просто додає AI-підбір кадрів у локальному режимі.</p>
+    </section>
+
+    <!-- ── FEATURES ──────────────────────────────────────────────────── -->
+    <section class="card features-card">
+      <h2>✨ Що вміє</h2>
+      <div class="features-grid">
+        <div class="feature">
+          <div class="feature-icon">🎙</div>
+          <strong>Авто-транскрипція</strong>
+          <span>OpenAI Whisper з word-level VAD — природні границі речень</span>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🎬</div>
+          <strong>Підбір медіа</strong>
+          <span>Pexels, Pixabay або твої локальні файли. Vision API + CLIP-семантика</span>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">⚡</div>
+          <strong>Mood-aware монтаж</strong>
+          <span>Розпізнає жанр (thriller/news/personal) — підбирає відповідні інсерти і SFX</span>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🔊</div>
+          <strong>Sidechain ducking</strong>
+          <span>SFX автоматично тихішають коли голос гучний. Loudnorm до -16 LUFS (YouTube/Spotify стандарт)</span>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">✂️</div>
+          <strong>YouTube-нарізка</strong>
+          <span>Вставив URL → готові кліпи з автоназвами через BLIP</span>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🎨</div>
+          <strong>5 типів інсертів</strong>
+          <span>Breaking news, location stamp, chapter card, redacted doc, typewriter</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── FAQ ──────────────────────────────────────────────────────── -->
+    <section class="card faq-card">
+      <h2>❓ FAQ</h2>
+      <details>
+        <summary>Чому в мене питає ліцензійний ключ?</summary>
+        <p>Аппка призначена для обмеженого кола користувачів. Адмін видає ключі індивідуально. Ключ зберігається на 7 днів — після цього перевірка повторюється.</p>
+      </details>
+      <details>
+        <summary>Скільки коштує?</summary>
+        <p>Аппка безкоштовна. Витрати — тільки <strong>OpenAI API</strong> (на твій ключ ~$0.05-0.20 на ролик) та опціональні <strong>Pexels/Pixabay</strong> ключі (безкоштовні tier-и).</p>
+      </details>
+      <details>
+        <summary>Чи зберігаються мої файли десь у хмарі?</summary>
+        <p>Ні. Все рендериться <strong>на твоєму компʼютері</strong>. Аудіо/відео не залишають твій Mac/PC. На сервер йдуть тільки запити до OpenAI/Pexels (з твоїми API-ключами).</p>
+      </details>
+      <details>
+        <summary>Що робити при помилці рендеру?</summary>
+        <p>Аппка має resume-from-cache: якщо рендер упав на кліпі 47/60 — наступний запуск з тими самими інпутами продовжить з того місця. Просто перезапусти монтаж.</p>
+      </details>
+      <details>
+        <summary>Як отримати ліцензійний ключ?</summary>
+        <p>Звернись напряму до адміна Fr1Ge STUDIO.</p>
+      </details>
+    </section>
+
+    <footer class="footer">
+      <p class="muted">© 2026 Fr1Ge Studio. <a href="https://github.com/vladsotnikov/fr1ge-studio" target="_blank">GitHub</a></p>
+    </footer>
+  </main>
+
+  <script>
+    // Auto-detect platform → highlight the relevant download card.
+    (function() {
+      const ua = navigator.userAgent;
+      let platform = "";
+      if (/Mac OS X/i.test(ua)) {
+        // Best-effort guess: Apple Silicon Macs report arm in some browsers.
+        platform = /arm/i.test(navigator.platform || "") || (navigator.userAgentData?.platform === "macOS" && navigator.userAgentData?.mobile === false)
+          ? "mac-arm"
+          : "mac-arm";  // default to arm since most newer Macs are Apple Silicon
+      } else if (/Windows/i.test(ua)) {
+        platform = "win";
+      }
+      const detectedNote = document.getElementById("detectedNote");
+      if (platform === "mac-arm") {
+        detectedNote.textContent = "Виявлено: macOS. Бери варіант Apple Silicon якщо у тебе M1/M2/M3/M4.";
+      } else if (platform === "win") {
+        detectedNote.textContent = "Виявлено: Windows.";
+      }
+      document.querySelectorAll(`[data-platform="${platform}"]`).forEach((el) => el.classList.add("highlight"));
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,320 @@
+:root {
+  --bg: #0f0f1e;
+  --bg-card: rgba(255, 255, 255, 0.03);
+  --bg-card-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+  --text: #f1f3f9;
+  --text-muted: #9ca3b9;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font: 15px/1.6 -apple-system, "Segoe UI", "Avenir Next", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 15% -10%, rgba(99, 102, 241, 0.25) 0, transparent 40%),
+    radial-gradient(circle at 90% 100%, rgba(139, 92, 246, 0.2) 0, transparent 40%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+a { color: var(--accent-hover); text-decoration: none; }
+a:hover { color: var(--text); }
+
+.page {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 20px 60px;
+}
+
+/* ── Hero ────────────────────────────────────────── */
+.hero {
+  text-align: center;
+  padding: 30px 20px 50px;
+}
+
+.hero-logo {
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
+  box-shadow: 0 12px 40px rgba(99, 102, 241, 0.5);
+  margin-bottom: 18px;
+}
+
+.kicker {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  color: var(--accent-hover);
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 8px 0 6px;
+  font-size: clamp(34px, 6vw, 54px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+h1 .accent {
+  background: var(--gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.tagline {
+  margin: 8px 0 28px;
+  font-size: clamp(16px, 2vw, 19px);
+  color: var(--text-muted);
+}
+
+.cta-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 24px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 15px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  color: var(--text);
+  transition: transform 0.15s ease, filter 0.15s ease, background 0.15s ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  background: var(--bg-card-hover);
+}
+
+.btn.primary {
+  background: var(--gradient);
+  border: none;
+  color: #fff;
+  box-shadow: 0 8px 28px rgba(99, 102, 241, 0.4);
+}
+
+.btn.primary:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 10px 36px rgba(99, 102, 241, 0.55);
+}
+
+.tiny { font-size: 13px; }
+.muted { color: var(--text-muted); }
+
+/* ── Cards ───────────────────────────────────────── */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 28px;
+  margin-bottom: 18px;
+  backdrop-filter: blur(10px);
+}
+
+.card h2 {
+  margin: 0 0 18px;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+/* ── Downloads ───────────────────────────────────── */
+.download-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin-bottom: 14px;
+}
+
+.dl-card {
+  display: flex;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  transition: all 0.15s ease;
+  align-items: center;
+}
+
+.dl-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-card-hover);
+  transform: translateY(-1px);
+}
+
+.dl-card.highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.dl-icon {
+  font-size: 32px;
+  flex-shrink: 0;
+}
+
+.dl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dl-body strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.dl-body span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.dl-body .dl-file {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--accent-hover);
+  margin-top: 4px;
+}
+
+/* ── Steps ───────────────────────────────────────── */
+.steps {
+  margin: 0;
+  padding-left: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.steps li {
+  padding-left: 4px;
+}
+
+.steps li small {
+  display: block;
+  margin-top: 4px;
+}
+
+.hint {
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  background: rgba(99, 102, 241, 0.08);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.hint.warn {
+  background: rgba(251, 146, 60, 0.08);
+  border-left-color: #fb923c;
+}
+
+.hint summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.hint p, .hint ul {
+  margin: 8px 0 0;
+}
+
+.hint ul {
+  padding-left: 20px;
+}
+
+.emoji-icon {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* ── Features ────────────────────────────────────── */
+.features-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.feature {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.feature-icon {
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+
+.feature strong {
+  font-size: 15px;
+  color: var(--text);
+}
+
+.feature span {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── FAQ ─────────────────────────────────────────── */
+.faq-card details {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.faq-card details:last-child {
+  border-bottom: none;
+}
+
+.faq-card summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 15px;
+  padding: 4px 0;
+}
+
+.faq-card summary:hover {
+  color: var(--accent-hover);
+}
+
+.faq-card p {
+  margin: 8px 0 4px;
+  color: var(--text-muted);
+}
+
+/* ── Footer ──────────────────────────────────────── */
+.footer {
+  text-align: center;
+  padding: 30px 0 10px;
+  color: var(--text-muted);
+}
+
+.footer a { color: var(--accent-hover); }
+
+/* ── Mobile ──────────────────────────────────────── */
+@media (max-width: 600px) {
+  .page { padding: 24px 14px 40px; }
+  .card { padding: 20px; }
+  .hero { padding: 20px 10px 30px; }
+  .hero-logo { width: 80px; height: 80px; }
+}
