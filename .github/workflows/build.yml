@@ -9,6 +9,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: write   # required to create GitHub Releases via softprops/action-gh-release
+
 jobs:
   # ────────────────────────────────────────────────────────────────────────
   # Windows .exe (NSIS installer)
