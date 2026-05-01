@@ -78,15 +78,27 @@ function startServer() {
   const { ffmpeg, ffprobe } = resolveBundledFfmpeg();
   const ytDlp = resolveBundledYtDlp();
   // Persistent storage for runtime-installed components (BLIP venv + models).
-  // Survives DMG updates because it lives in the user's library, not the bundle.
-  // macOS: ~/Library/Application Support/Fr1Ge STUDIO/
-  // Windows: %APPDATA%/Fr1Ge STUDIO/
   const userDataDir = app.getPath("userData");
+  // Persistent log so users can share what crashed when there's no terminal.
+  const logFile = path.join(userDataDir, "server.log");
+  let logStream = null;
+  try {
+    fs.mkdirSync(userDataDir, { recursive: true });
+    logStream = fs.createWriteStream(logFile, { flags: "w" });
+    logStream.write(`=== Fr1Ge STUDIO server start @ ${new Date().toISOString()} ===\n`);
+    logStream.write(`platform=${process.platform} arch=${process.arch}\n`);
+    logStream.write(`PROJECT_ROOT=${PROJECT_ROOT}\n`);
+    logStream.write(`SERVER_SCRIPT=${SERVER_SCRIPT}\n`);
+    logStream.write(`FFMPEG=${ffmpeg || "(none)"}\n`);
+    logStream.write(`FFPROBE=${ffprobe || "(none)"}\n`);
+    logStream.write(`YT_DLP=${ytDlp || "(none)"}\n\n`);
+  } catch (e) { /* logging is best-effort */ }
   if (isDev) {
     console.log("[VSS] FFmpeg:", ffmpeg || "(system)");
     console.log("[VSS] FFprobe:", ffprobe || "(system)");
     console.log("[VSS] yt-dlp:", ytDlp || "(system)");
     console.log("[VSS] userData:", userDataDir);
+    console.log("[VSS] Log file:", logFile);
   }
 
   return new Promise((resolve, reject) => {
@@ -95,13 +107,11 @@ function startServer() {
         ...process.env,
         PORT: String(PORT),
         HOST: "127.0.0.1",
-        // Bundled binaries beat system PATH so users without local installs work too.
         ...(ffmpeg ? { FFMPEG_BIN: ffmpeg } : {}),
         ...(ffprobe ? { FFPROBE_BIN: ffprobe } : {}),
         ...(ytDlp ? { YT_DLP_BIN: ytDlp } : {}),
-        // Persistent app data dir for lazy-installed BLIP runtime.
         VSS_USER_DATA_DIR: userDataDir,
-        ELECTRON_RUN_AS_NODE: "1"  // run bundled Node, not Electron, for the child
+        ELECTRON_RUN_AS_NODE: "1"
       },
       cwd: PROJECT_ROOT,
       stdio: ["ignore", "pipe", "pipe"]
@@ -110,16 +120,23 @@ function startServer() {
     let stderr = "";
     serverProcess.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
-      // Forward to terminal in dev so we see server logs.
+      logStream?.write(chunk);
       if (isDev) process.stderr.write(chunk);
     });
-    if (isDev) {
-      serverProcess.stdout.on("data", (chunk) => process.stdout.write(chunk));
-    }
+    serverProcess.stdout.on("data", (chunk) => {
+      logStream?.write(chunk);
+      if (isDev) process.stdout.write(chunk);
+    });
 
-    serverProcess.on("error", (err) => reject(err));
+    serverProcess.on("error", (err) => {
+      logStream?.write(`\n[spawn error] ${err.message}\n`);
+      reject(err);
+    });
     serverProcess.on("exit", (code) => {
-      if (code !== 0 && !mainWindow) reject(new Error(`Server exited (${code}). ${stderr.slice(0, 400)}`));
+      logStream?.write(`\n[exit] code=${code}\n`);
+      if (code !== 0 && !mainWindow) {
+        reject(new Error(`Server exited (${code}).\nЛог: ${logFile}\n\n${stderr.slice(0, 600)}`));
+      }
     });
 
     // Poll the server until it accepts a connection. Server boot takes ~0.5-2s.
