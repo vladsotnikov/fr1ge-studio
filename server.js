@@ -6250,6 +6250,17 @@ app.post("/api/blip/install", async (req, res) => {
   });
 });
 
+// Wrap a command run with a labeled error message so the UI can tell users
+// "stage X failed because Y" instead of a generic stack trace.
+async function runStep(label, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    const detail = String(e?.message || e).slice(0, 800);
+    throw new Error(`${label}: ${detail}`);
+  }
+}
+
 // Implementation: download portable Python, create venv, install deps,
 // download BLIP model. Each step reports progress via onEvent callback.
 async function installBlipRuntime(onEvent) {
@@ -6286,15 +6297,17 @@ async function installBlipRuntime(onEvent) {
   try { await fs.access(pythonBin); pythonReady = true; } catch { /* not yet */ }
 
   if (!pythonReady) {
-    onEvent({ progress: 5, log: `Завантаження Python ${PY_VERSION} (~30MB)...` });
-    const tarPath = path.join(userBlipRoot, "python.tar.gz");
-    const resp = await fetchWithTimeout(pyUrl, {}, 120000);
-    if (!resp.ok) throw new Error(`Python download failed: HTTP ${resp.status}`);
-    await fs.writeFile(tarPath, Buffer.from(await resp.arrayBuffer()));
-    onEvent({ progress: 15, log: "Розпаковка Python..." });
-    await fs.mkdir(pyDir, { recursive: true });
-    await runCommand("tar", ["-xzf", tarPath, "-C", pyDir], { timeoutMs: 120000 });
-    await fs.unlink(tarPath).catch(() => {});
+    await runStep("Завантаження Python", async () => {
+      onEvent({ progress: 5, log: `Завантаження Python ${PY_VERSION} (~30MB)...` });
+      const tarPath = path.join(userBlipRoot, "python.tar.gz");
+      const resp = await fetchWithTimeout(pyUrl, {}, 180000);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      await fs.writeFile(tarPath, Buffer.from(await resp.arrayBuffer()));
+      onEvent({ progress: 15, log: "Розпаковка Python..." });
+      await fs.mkdir(pyDir, { recursive: true });
+      await runCommand("tar", ["-xzf", tarPath, "-C", pyDir], { timeoutMs: 180000 });
+      await fs.unlink(tarPath).catch(() => {});
+    });
   }
 
   // 3. Create venv from portable Python.
@@ -6302,29 +6315,32 @@ async function installBlipRuntime(onEvent) {
   try { await fs.access(userVenvPython); venvReady = true; } catch { /* not yet */ }
 
   if (!venvReady) {
-    onEvent({ progress: 25, log: "Створення віртуального середовища..." });
-    await runCommand(pythonBin, ["-m", "venv", venvDir], { timeoutMs: 60000 });
+    await runStep("Створення virtualenv", async () => {
+      onEvent({ progress: 25, log: "Створення віртуального середовища..." });
+      await runCommand(pythonBin, ["-m", "venv", venvDir], { timeoutMs: 120000 });
+    });
   }
 
   // 4. Install Python deps (torch CPU + transformers + pillow). ~600MB download.
-  onEvent({ progress: 30, log: "Встановлення PyTorch + Transformers (~600MB)..." });
-  const pipBin = path.join(venvDir, platform === "win32" ? "Scripts" : "bin", platform === "win32" ? "pip.exe" : "pip");
-  await runCommand(pipBin, [
-    "install",
-    "--upgrade",
-    "--no-cache-dir",
-    "torch",
-    "torchvision",
-    "transformers>=4.40",
-    "pillow",
-    "huggingface_hub"
-  ], { timeoutMs: 600000, env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" } });
+  await runStep("pip install torch+transformers", async () => {
+    onEvent({ progress: 30, log: "Встановлення PyTorch + Transformers (~600MB)..." });
+    const pipBin = path.join(venvDir, platform === "win32" ? "Scripts" : "bin", platform === "win32" ? "pip.exe" : "pip");
+    await runCommand(pipBin, [
+      "install",
+      "--upgrade",
+      "--no-cache-dir",
+      "torch",
+      "torchvision",
+      "transformers>=4.40",
+      "pillow",
+      "huggingface_hub"
+    ], { timeoutMs: 1200000, env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" } });
+  });
 
-  onEvent({ progress: 70, log: "Завантаження BLIP моделі (~700MB)..." });
-
-  // 5. Pre-fetch BLIP model so first run is offline-fast. transformers will
-  // store it in HF_HOME (which we've pointed at userModelsCache).
-  const downloadScript = `
+  // 5. Pre-fetch BLIP model so first run is offline-fast.
+  await runStep("Завантаження BLIP-моделі", async () => {
+    onEvent({ progress: 70, log: "Завантаження BLIP моделі (~700MB)..." });
+    const downloadScript = `
 import os
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ["HF_HOME"] = "${userModelsCache.replace(/\\/g, "/")}"
@@ -6334,10 +6350,31 @@ BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 print("OK")
 `;
-  await runCommand(userVenvPython, ["-c", downloadScript], { timeoutMs: 900000 });
+    await runCommand(userVenvPython, ["-c", downloadScript], { timeoutMs: 1200000 });
+  });
 
   onEvent({ progress: 100, log: "Готово! BLIP працює офлайн." });
 }
+
+// Reset endpoint: deletes BLIP runtime so user can retry from scratch.
+app.post("/api/blip/reset", async (_req, res) => {
+  if (blipInstallState.running) {
+    return res.status(409).json({ error: "Установка ще йде, спочатку дочекайся завершення або перезапусти аппку" });
+  }
+  const { userBlipRoot } = getBlipPaths();
+  if (!userBlipRoot) return res.status(400).json({ error: "userData not configured" });
+  try {
+    await fs.rm(userBlipRoot, { recursive: true, force: true });
+    // Force ensureBlipAvailable() to re-check on next call.
+    blipChecked = false;
+    blipPythonBin = "";
+    blipScriptPath = "";
+    blipInitError = "";
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });

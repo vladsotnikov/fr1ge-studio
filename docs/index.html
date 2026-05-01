@@ -17,41 +17,42 @@
       <h1>Fr1Ge <span class="accent">STUDIO</span></h1>
       <p class="tagline">Завантаж аудіо. Отримай готовий змонтований ролик.</p>
 
-      <!-- Detected-platform CTA fills in via JS; fallback shows both. -->
+      <!-- Detected-platform CTA fills in via JS; fallback links to releases page. -->
       <div id="primaryCta" class="cta-row">
-        <a class="btn primary" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank">
+        <a class="btn primary" id="primaryDl" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank">
           <span>Скачати останню версію</span>
         </a>
       </div>
       <p class="tiny muted" id="detectedNote"></p>
+      <p class="tiny muted" id="versionNote"></p>
     </header>
 
     <!-- ── DOWNLOADS ──────────────────────────────────────────────────── -->
     <section class="card">
       <h2>📥 Завантажити</h2>
       <div class="download-grid">
-        <a class="dl-card" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="mac-arm">
+        <a class="dl-card" id="dlMacArm" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="mac-arm">
           <div class="dl-icon">🍎</div>
           <div class="dl-body">
             <strong>Mac (Apple Silicon)</strong>
             <span>M1 / M2 / M3 / M4</span>
-            <span class="dl-file">Fr1Ge STUDIO-*-arm64.dmg</span>
+            <span class="dl-file">завантажується…</span>
           </div>
         </a>
-        <a class="dl-card" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="mac-intel">
+        <a class="dl-card" id="dlMacIntel" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="mac-intel">
           <div class="dl-icon">🍎</div>
           <div class="dl-body">
             <strong>Mac (Intel)</strong>
             <span>x86_64</span>
-            <span class="dl-file">Fr1Ge STUDIO-*-x64.dmg</span>
+            <span class="dl-file">завантажується…</span>
           </div>
         </a>
-        <a class="dl-card" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="win">
+        <a class="dl-card" id="dlWin" href="https://github.com/vladsotnikov/fr1ge-studio/releases/latest" target="_blank" data-platform="win">
           <div class="dl-icon">🪟</div>
           <div class="dl-body">
             <strong>Windows</strong>
             <span>10 / 11, x64</span>
-            <span class="dl-file">Fr1Ge STUDIO-*.exe</span>
+            <span class="dl-file">завантажується…</span>
           </div>
         </a>
       </div>
@@ -201,15 +202,12 @@
   </main>
 
   <script>
-    // Auto-detect platform → highlight the relevant download card.
+    // ─── Platform detection ────────────────────────────────────────
     (function() {
       const ua = navigator.userAgent;
       let platform = "";
       if (/Mac OS X/i.test(ua)) {
-        // Best-effort guess: Apple Silicon Macs report arm in some browsers.
-        platform = /arm/i.test(navigator.platform || "") || (navigator.userAgentData?.platform === "macOS" && navigator.userAgentData?.mobile === false)
-          ? "mac-arm"
-          : "mac-arm";  // default to arm since most newer Macs are Apple Silicon
+        platform = "mac-arm"; // default to arm; most modern Macs are Apple Silicon
       } else if (/Windows/i.test(ua)) {
         platform = "win";
       }
@@ -220,6 +218,60 @@
         detectedNote.textContent = "Виявлено: Windows.";
       }
       document.querySelectorAll(`[data-platform="${platform}"]`).forEach((el) => el.classList.add("highlight"));
+      window.__detectedPlatform = platform;
+    })();
+
+    // ─── Fetch latest release from GitHub API → wire direct download links ──
+    (async function() {
+      try {
+        const resp = await fetch("https://api.github.com/repos/vladsotnikov/fr1ge-studio/releases/latest");
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const data = await resp.json();
+        const assets = data.assets || [];
+
+        // Match assets by suffix patterns (works across versions: 1.0.0, 1.1.0…)
+        const byPattern = (re) => assets.find((a) => re.test(a.name));
+        const macArm  = byPattern(/-arm64\.dmg$/i);
+        const macX64  = byPattern(/-1\.\d+\.\d+\.dmg$/i) || byPattern(/(?<!arm64)\.dmg$/i);
+        const winExe  = byPattern(/\.exe$/i);
+
+        const setLink = (id, asset, fileLabel) => {
+          if (!asset) return;
+          const card = document.getElementById(id);
+          if (!card) return;
+          card.href = asset.browser_download_url;
+          const fileEl = card.querySelector(".dl-file");
+          if (fileEl) {
+            const sizeMb = (asset.size / (1024 * 1024)).toFixed(0);
+            fileEl.textContent = `${fileLabel} • ${sizeMb} MB`;
+          }
+        };
+
+        setLink("dlMacArm",   macArm, "Завантажити DMG (arm64)");
+        setLink("dlMacIntel", macX64, "Завантажити DMG (Intel)");
+        setLink("dlWin",      winExe, "Завантажити .exe");
+
+        // Primary CTA → user's detected platform
+        const primary = document.getElementById("primaryDl");
+        const detected = window.__detectedPlatform;
+        const primaryAsset =
+          detected === "mac-arm" ? macArm :
+          detected === "win"     ? winExe :
+                                   null;
+        if (primary && primaryAsset) {
+          primary.href = primaryAsset.browser_download_url;
+          primary.querySelector("span").textContent = `Скачати ${data.tag_name || "останню версію"}`;
+        }
+
+        const versionNote = document.getElementById("versionNote");
+        if (versionNote && data.tag_name) {
+          const date = data.published_at ? new Date(data.published_at).toLocaleDateString("uk") : "";
+          versionNote.textContent = `Версія ${data.tag_name}${date ? " · " + date : ""}`;
+        }
+      } catch (e) {
+        // Soft fallback: links remain pointing to /releases/latest page (still works).
+        console.warn("Could not fetch release info:", e);
+      }
     })();
   </script>
 </body>

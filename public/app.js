@@ -3306,6 +3306,7 @@ const blipUi = {
   status: document.getElementById("blipSetupStatus"),
   actions: document.getElementById("blipSetupActions"),
   installBtn: document.getElementById("blipInstallBtn"),
+  resetBtn: document.getElementById("blipResetBtn"),
   progressWrap: document.getElementById("blipSetupProgress"),
   progressBar: document.getElementById("blipSetupProgressBar"),
   progressLog: document.getElementById("blipSetupProgressLog")
@@ -3400,7 +3401,27 @@ async function startBlipInstall() {
   }
 }
 
+async function resetBlip() {
+  if (!confirm("Видалити поточну BLIP-установку і почати заново? Усі вже скачані файли (~1.5GB) будуть стерті.")) return;
+  blipUi.resetBtn.disabled = true;
+  blipUi.status.textContent = "⏳ Видаляю...";
+  try {
+    const resp = await fetch("/api/blip/reset", { method: "POST" });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+    blipUi.status.textContent = "✅ Очищено. Натисни 'Завантажити BLIP' щоб почати ще раз.";
+    await refreshBlipStatus();
+  } catch (e) {
+    blipUi.status.textContent = `❌ ${e.message}`;
+  } finally {
+    blipUi.resetBtn.disabled = false;
+  }
+}
+
 blipUi.installBtn?.addEventListener("click", startBlipInstall);
+blipUi.resetBtn?.addEventListener("click", resetBlip);
 
 restoreUiSettings();
 updateModeUi();
