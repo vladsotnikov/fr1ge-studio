@@ -153,7 +153,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   font-weight: 600;
 }
 
-.hidden { display: none; }
+.hidden { display: none !important; }
 
 .local-analyze-card {
   border: 1px solid var(--line);

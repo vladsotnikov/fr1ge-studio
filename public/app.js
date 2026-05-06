@@ -42,8 +42,14 @@ const el = {
   proInsertChapterCard: document.getElementById("proInsertChapterCard"),
   proInsertRedactedDoc: document.getElementById("proInsertRedactedDoc"),
   proInsertTypewriter: document.getElementById("proInsertTypewriter"),
+  proInsertAmbient: document.getElementById("proInsertAmbient"),
+  proInsertProgressBar: document.getElementById("proInsertProgressBar"),
+  proInsertQuoteBlock: document.getElementById("proInsertQuoteBlock"),
+  proInsertAnimatedCounter: document.getElementById("proInsertAnimatedCounter"),
   sfxEnabled: document.getElementById("sfxEnabled"),
   sfxVolume: document.getElementById("sfxVolume"),
+  musicEnabled: document.getElementById("musicEnabled"),
+  musicVolume: document.getElementById("musicVolume"),
   sfxPack: document.getElementById("sfxPack"),
   visionVerifyVideoWrap: document.getElementById("visionVerifyVideoWrap"),
   visionVerifyImageWrap: document.getElementById("visionVerifyImageWrap"),
@@ -227,7 +233,7 @@ function saveUiSettings() {
       imageAnimStyle: el.imageAnimStyle?.value || "combo",
       imageAnimStrength: el.imageAnimStrength?.value || "2",
       transitionPack: el.transitionPack?.value || "dynamic",
-      transitionDuration: el.transitionDuration?.value || "0.26",
+      transitionDuration: el.transitionDuration?.value || "0.32",
       subtitlesEnabled: Boolean(el.subtitlesEnabled?.checked),
       proMontageMode: el.proMontageMode?.value || "auto",
       proInsertDensity: el.proInsertDensity?.value || "medium",
@@ -242,9 +248,15 @@ function saveUiSettings() {
       proInsertChapterCard: Boolean(el.proInsertChapterCard?.checked),
       proInsertRedactedDoc: Boolean(el.proInsertRedactedDoc?.checked),
       proInsertTypewriter: Boolean(el.proInsertTypewriter?.checked),
+      proInsertAmbient: el.proInsertAmbient?.checked !== false,
+      proInsertProgressBar: el.proInsertProgressBar?.checked !== false,
+      proInsertQuoteBlock: el.proInsertQuoteBlock?.checked !== false,
+      proInsertAnimatedCounter: el.proInsertAnimatedCounter?.checked !== false,
       sfxEnabled: Boolean(el.sfxEnabled?.checked),
-      sfxVolume: el.sfxVolume?.value || "0.85",
+      sfxVolume: el.sfxVolume?.value || "1.1",
       sfxPack: el.sfxPack?.value || "cinematic",
+      musicEnabled: el.musicEnabled?.checked !== false,
+      musicVolume: el.musicVolume?.value || "0.28",
       visionVerifyAllVideo: Boolean(el.visionVerifyAllVideo?.checked),
       visionVerifyAllImage: Boolean(el.visionVerifyAllImage?.checked),
       allowAiFallback: Boolean(el.allowAiFallback?.checked),
@@ -288,7 +300,7 @@ function restoreUiSettings() {
     setVal(el.imageAnimStyle, String(data.imageAnimStyle || "combo"));
     setVal(el.imageAnimStrength, String(data.imageAnimStrength || "2"));
     setVal(el.transitionPack, String(data.transitionPack || "dynamic"));
-    setVal(el.transitionDuration, String(data.transitionDuration || "0.26"));
+    setVal(el.transitionDuration, String(data.transitionDuration || "0.32"));
     if (el.subtitlesEnabled) el.subtitlesEnabled.checked = data.subtitlesEnabled !== false;
     setVal(el.proMontageMode, String(data.proMontageMode || "auto"));
     setVal(el.proInsertDensity, String(data.proInsertDensity || "medium"));
@@ -942,6 +954,40 @@ async function saveUrlToChosenLocation(url, suggestedName) {
   URL.revokeObjectURL(href);
 }
 
+// Per-segment match status: "idle" | "matching" | "matched" | "failed".
+// Drives the status badge shown next to each segment so the user can watch
+// the picker work in real time instead of staring at one aggregate %.
+const segmentMatchStatus = new Map();   // segmentId → { status, ms, asset? }
+
+function setSegmentMatchStatus(segmentId, status, extra = {}) {
+  segmentMatchStatus.set(String(segmentId), { status, ...extra });
+  // Live-update just this segment's badge if it's already in the DOM.
+  const el = document.querySelector(`[data-segment-id="${String(segmentId)}"] .segment-status`);
+  if (el) el.outerHTML = renderSegmentStatusBadge(segmentId);
+}
+
+function clearSegmentMatchStatuses() {
+  segmentMatchStatus.clear();
+}
+
+function renderSegmentStatusBadge(segmentId) {
+  const s = segmentMatchStatus.get(String(segmentId));
+  if (!s || s.status === "idle") {
+    return `<span class="segment-status" style="font-size:11px;color:#94a3b9;">⚪ очікує</span>`;
+  }
+  if (s.status === "matching") {
+    return `<span class="segment-status" style="font-size:11px;color:#f59e0b;">🔄 матчиться…</span>`;
+  }
+  if (s.status === "matched") {
+    const ms = s.ms != null ? ` · ${(s.ms / 1000).toFixed(1)}s` : "";
+    return `<span class="segment-status" style="font-size:11px;color:#15803d;">✅ підібрано${ms}</span>`;
+  }
+  if (s.status === "failed") {
+    return `<span class="segment-status" style="font-size:11px;color:#dc2626;">❌ не вдалось</span>`;
+  }
+  return `<span class="segment-status"></span>`;
+}
+
 function renderSegments() {
   if (!state.segments.length) {
     el.segments.className = "segments empty";
@@ -953,8 +999,11 @@ function renderSegments() {
   el.segments.innerHTML = state.segments.map((seg) => {
     const duration = Math.max(0.2, Number(seg.end || 0) - Number(seg.start || 0));
     return `
-      <article class="segment">
-        <div class="time">${secToTime(seg.start)} - ${secToTime(seg.end)} (${duration.toFixed(1)} c)</div>
+      <article class="segment" data-segment-id="${escapeHtml(String(seg.id))}">
+        <div class="time" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <span>${secToTime(seg.start)} - ${secToTime(seg.end)} (${duration.toFixed(1)} c)</span>
+          ${renderSegmentStatusBadge(seg.id)}
+        </div>
         <strong>${escapeHtml(seg.text)}</strong>
         <div>Фокус: ${escapeHtml(seg.focus || getSegmentFocus(seg) || "-")}</div>
       </article>
@@ -979,18 +1028,92 @@ function renderMatches(rows) {
       : `<img src="${row.asset.previewUrl}" alt="asset">`;
 
     const aiInfo = row.asset.aiSummary
-      ? `<div>AI-аналіз: ${escapeHtml(row.asset.aiSummary)}</div>`
+      ? `<div>AI-опис кадру: ${escapeHtml(row.asset.aiSummary)}</div>`
       : "";
     const ocrInfo = row.asset.aiOcr
-      ? `<div>OCR: ${escapeHtml(String(row.asset.aiOcr).slice(0, 180))}</div>`
+      ? `<div>Текст з кадру (OCR): ${escapeHtml(String(row.asset.aiOcr).slice(0, 180))}</div>`
       : "";
-    const reasonInfo = row.reason ? `<div>Причина: ${escapeHtml(row.reason)}</div>` : "";
+
+    // Human-readable Ukrainian explanation. Shows CONCRETELY:
+    //  – які слова сегменту збіглися з кадром (якщо є),
+    //  – які об'єкти/теги бачить BLIP у кадрі,
+    //  – чому саме цей кадр (метод + score),
+    //  – якщо немає прямого збігу — чесно так і пише.
+    function buildHumanReason(r) {
+      const reason = String(r.reason || "");
+      const src = r.matchSource || "";
+      const emb = Number.isFinite(r.embScore) ? r.embScore : null;
+      const tokens = Number.isFinite(r.tokenScore) ? r.tokenScore : null;
+      const STOP = new Set(["that","this","with","from","have","they","were","will","been","when","than","their","said","which","what","then","more","also","some","into","after","about","over","other","these","would","there","could","before","between","during","through","перед","після","потім","також","коли","буде","який","яка","які","його","своє","якщо","тому","адже","хоча","поки","можна","навіть","вони","вона","также","когда","будет","который","которая","если","потому","даже","они","der","die","das","und","ist","von","den","ein","eine","mit","auf","für","wir","ihr","sie","wie","auch","aber","oder","über","nach","bei","aus","beginnen","kanal","hier","analysieren","abonniere"]);
+      const tokenize = (txt) => new Set(
+        String(txt || "").toLowerCase().split(/[^a-zа-яіїєґöäüß0-9]+/)
+          .filter((w) => w.length > 3 && !STOP.has(w))
+      );
+      const segWords = tokenize(r.segment?.text);
+      const tags = Array.isArray(r.asset?.tags) ? r.asset.tags.map((x) => String(x).toLowerCase()) : [];
+      const objs = Array.isArray(r.asset?.objects) ? r.asset.objects.map((x) => String(x).toLowerCase()) : [];
+      const assetWords = new Set([
+        ...tokenize(r.asset?.aiSummary),
+        ...tokenize(r.asset?.aiOcr),
+        ...tags, ...objs,
+        ...tokenize(r.asset?.title), ...tokenize(r.asset?.scene)
+      ]);
+      const overlap = [...segWords].filter((w) => assetWords.has(w)).slice(0, 8);
+      const seenInClip = [
+        ...(r.asset?.aiSummary ? [String(r.asset.aiSummary).slice(0, 80)] : []),
+        ...objs.slice(0, 4)
+      ].filter(Boolean).slice(0, 2);
+
+      const parts = [];
+
+      // Block 1 — what we KNOW about the clip.
+      if (seenInClip.length) {
+        parts.push(`У кадрі: ${seenInClip.join("; ")}`);
+      }
+
+      // Block 2 — what matched.
+      if (overlap.length) {
+        parts.push(`збіг по словах: «${overlap.join(", ")}»`);
+      }
+
+      // Block 3 — method-specific verdict.
+      if (src === "embed-strong") {
+        parts.push(`CLIP підтвердив сильний семантичний зв'язок (score ${emb !== null ? emb.toFixed(1) : "?"}/10)`);
+      } else if (src === "embed") {
+        parts.push(`CLIP бачить помірну схожість (score ${emb !== null ? emb.toFixed(1) : "?"}/10)`);
+      } else if (src === "ai-local") {
+        if (!overlap.length && !seenInClip.length) {
+          parts.push("AI вибрав без явних маркерів — перший прийнятний кадр у наборі");
+        } else if (!overlap.length) {
+          parts.push("AI вирішив що візуал кадру підходить за настроєм/тематикою (прямих слів немає)");
+        } else {
+          parts.push("AI порівняв сенс сегменту з описом кадру і вибрав цей");
+        }
+      } else if (src === "token") {
+        if (!overlap.length) {
+          parts.push("прямих слів сегменту в кадрі не знайдено — взято найкращий доступний");
+        } else {
+          parts.push(`підібрано по словесному збігу (score ${tokens !== null ? tokens.toFixed(1) : "?"})`);
+        }
+      } else if (src === "weak") {
+        parts.push("у наборі мало релевантних файлів — взято найкращий з наявних");
+      } else if (!parts.length) {
+        // No matchSource info at all — give whatever data we have.
+        parts.push("підбір без явного семантичного сигналу");
+      }
+
+      if (reason.includes("adjacent-dedupe")) parts.push("замінено щоб не повторити сусідній кадр");
+      if (reason.includes("emergency")) parts.push("РЕЗЕРВ — кращого варіанту в наборі не було");
+      return parts.join(". ");
+    }
+    const humanReason = buildHumanReason(row);
+    const reasonInfo = humanReason ? `<div>Чому цей кадр: ${escapeHtml(humanReason)}</div>` : "";
 
     const methodLabels = {
-      "embed-strong": { label: "CLIP", color: "#10b981", title: "Сильний семантичний матч (CLIP)" },
+      "embed-strong": { label: "CLIP сильний", color: "#10b981", title: "Сильний семантичний матч (CLIP)" },
       "embed":        { label: "CLIP", color: "#3b82f6", title: "Семантичний матч (CLIP)" },
-      "token":        { label: "Tokens", color: "#6b7280", title: "Збіг по токенах" },
-      "weak":         { label: "Weak", color: "#f59e0b", title: "Слабкий матч" },
+      "token":        { label: "Ключові слова", color: "#6b7280", title: "Збіг по словах" },
+      "weak":         { label: "Слабкий", color: "#f59e0b", title: "Слабкий матч" },
       "ai-local":     { label: "AI", color: "#8b5cf6", title: "AI-локальний підбір" }
     };
     const m = methodLabels[row.matchSource];
@@ -998,13 +1121,24 @@ function renderMatches(rows) {
       ? `<div style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:${m.color};color:#fff;margin-bottom:4px;" title="${escapeHtml(m.title)}">${m.label}${Number.isFinite(row.embScore) ? ` · ${row.embScore.toFixed(1)}` : ""}</div>`
       : "";
 
+    // Translate technical source/kind codes to Ukrainian.
+    const sourceUa = { local: "локальний файл", stock: "сток", generated: "згенероване AI" }[row.asset.source] || row.asset.source;
+    const kindUa = { video: "відео", image: "зображення", other: "інше" }[row.asset.kind] || row.asset.kind;
+
+    // Show segment translation/focus underneath the original (which may be in
+    // a foreign language like German). Falls back to lazy-computing if missing.
+    const focusText = row.segment?.focus || (typeof getSegmentFocus === "function" ? getSegmentFocus(row.segment) : "");
+    const focusLine = focusText && focusText !== row.segment?.text
+      ? `<div style="color:#6b7280;font-size:13px;margin-top:2px;">Зміст: ${escapeHtml(focusText)}</div>`
+      : "";
+
     return `
       <article class="match-item">
         <div><strong>${secToTime(row.segment.start)} - ${secToTime(row.segment.end)}</strong></div>
         ${methodBadge}
         <div>${escapeHtml(row.segment.text)}</div>
-        <div>Запит: <em>${escapeHtml(row.query)}</em></div>
-        <div>Джерело: ${escapeHtml(row.asset.source)} (${escapeHtml(row.asset.kind)})</div>
+        ${focusLine}
+        <div>Джерело: ${escapeHtml(sourceUa)} (${escapeHtml(kindUa)})</div>
         ${aiInfo}
         ${ocrInfo}
         ${reasonInfo}
@@ -1075,11 +1209,11 @@ async function transcribe() {
       return;
     }
 
-    const maxAudioBytes = 25 * 1024 * 1024;
-    if ((file.size || 0) > maxAudioBytes) {
-      const mb = (file.size / (1024 * 1024)).toFixed(1);
-      setStatus(`Файл завеликий для транскрипції OpenAI (${mb} MB). Ліміт: 25 MB. Стисни або розріж аудіо.`, true);
-      return false;
+    // No client-side size limit: server compresses to mono 16kHz MP3 and splits
+    // into <25MB chunks automatically, so even 2GB videos work for transcription.
+    const mb = (file.size / (1024 * 1024)).toFixed(1);
+    if (Number(mb) > 25) {
+      setStatus(`Файл ${mb} MB — сервер автоматично стисне аудіо і за потреби розіб'є на чанки. Це може зайняти 1-3 хвилини.`);
     }
 
     const form = new FormData();
@@ -1175,36 +1309,90 @@ async function analyzeLocalAssets(files) {
   form.append("openaiApiKey", localAnalyzeMode === "openai" ? el.openaiKey.value.trim() : "");
   form.append("language", el.language.value.trim());
 
-  const response = await fetch("/api/local/analyze", {
-    method: "POST",
-    body: form
-  });
-  const raw = await response.text();
-  let data = {};
-
-  if (raw) {
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      if (response.status === 404) {
-        return { assets: [], fallbackReason: "route_missing" };
-      }
-      if (!response.ok) {
-        throw new Error(`Аналіз локального контенту (${response.status}) недоступний. Працюю у fallback-режимі`);
-      }
-      return { assets: [], fallbackReason: "non_json" };
-    }
+  const response = await fetch("/api/local/analyze", { method: "POST", body: form });
+  if (response.status === 404) return { assets: [], fallbackReason: "route_missing" };
+  if (!response.ok || !response.body) {
+    let errMsg = `Аналіз локального контенту: помилка ${response.status}`;
+    try { const j = await response.json(); if (j?.error) errMsg = j.error; } catch {}
+    throw new Error(errMsg);
   }
 
-  if (!response.ok) {
-    if (response.status === 404) {
-      return { assets: [], fallbackReason: "route_missing" };
+  // Parse NDJSON stream — server sends {type:"progress",done,total,filename}
+  // per file, then a final {type:"done",assets:[...]}. Older non-streaming
+  // responses (single JSON blob) still work via the fallback at the bottom.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let assets = null;
+  let fallbackJson = null;
+  let total = files.length || 1;
+  let lastDone = 0;
+  const startedAt = Date.now();
+  // Pulse timer — refreshes the status bar every second so the user sees
+  // elapsed time / ETA even while a single slow file is being processed
+  // (BLIP captioning can take 5-10s on the first file).
+  const pulse = setInterval(() => {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const rate = lastDone / Math.max(1, elapsed);  // files per sec
+    const remaining = total - lastDone;
+    const etaSec = rate > 0 ? remaining / rate : 0;
+    const etaTxt = etaSec
+      ? (etaSec < 90 ? `${Math.round(etaSec)}с` : `${(etaSec / 60).toFixed(1)}хв`)
+      : "—";
+    const elTxt = elapsed < 90 ? `${Math.round(elapsed)}с` : `${(elapsed / 60).toFixed(1)}хв`;
+    const pct = 12 + Math.round((lastDone / total) * 6);
+    setProgress(
+      "Підбір контенту",
+      pct,
+      `Проаналізовано ${lastDone}/${total} · ${elTxt} · ETA ${etaTxt}`
+    );
+  }, 1000);
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let evt;
+        try { evt = JSON.parse(trimmed); } catch { continue; }
+        if (evt.type === "start" && evt.total) {
+          total = evt.total;
+        } else if (evt.type === "progress" && evt.total) {
+          total = evt.total;
+          lastDone = evt.done || lastDone;
+          // Keep pulse-driven updates fresh — also push immediately when a
+          // file finishes so filename gets shown.
+          const elapsed = (Date.now() - startedAt) / 1000;
+          const rate = lastDone / Math.max(1, elapsed);
+          const remaining = total - lastDone;
+          const etaSec = rate > 0 ? remaining / rate : 0;
+          const etaTxt = etaSec < 90 ? `${Math.round(etaSec)}с` : `${(etaSec / 60).toFixed(1)}хв`;
+          setProgress(
+            "Підбір контенту",
+            12 + Math.round((lastDone / total) * 6),
+            `Проаналізовано ${lastDone}/${total} · ETA ${etaTxt}${evt.filename ? ` · ${evt.filename}` : ""}`
+          );
+        } else if (evt.type === "done" && Array.isArray(evt.assets)) {
+          assets = evt.assets;
+        } else if (evt.type === "error") {
+          throw new Error(evt.error || "Помилка аналізу медіа");
+        } else if (Array.isArray(evt.assets)) {
+          // Legacy single-blob response
+          fallbackJson = evt;
+        }
+      }
     }
-    throw new Error(data?.error || `Аналіз локального контенту: помилка ${response.status}`);
+  } finally {
+    clearInterval(pulse);
   }
 
   return {
-    assets: Array.isArray(data.assets) ? data.assets : [],
+    assets: assets || (fallbackJson?.assets || []),
     fallbackReason: ""
   };
 }
@@ -1983,7 +2171,7 @@ function getStockReuseCapByKind(mediaType) {
   return { video: STOCK_ASSET_MAX_REUSE, image: STOCK_ASSET_MAX_REUSE };
 }
 
-async function assignStockAssetsGlobally({ segments, mediaType, stockConfig, allowAiFallback, strictVision, reroll, verificationMode = "none", onProgress = null }) {
+async function assignStockAssetsGlobally({ segments, mediaType, stockConfig, allowAiFallback, strictVision, reroll, verificationMode = "none", onProgress = null, onSegmentStart = null, onSegmentDone = null }) {
   const stockPicks = [];
   const usageMap = new Map();
   const usedFallbackPerSegment = new Set();
@@ -1992,6 +2180,8 @@ async function assignStockAssetsGlobally({ segments, mediaType, stockConfig, all
 
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i];
+    const segStartTs = Date.now();
+    try { onSegmentStart?.(segment); } catch {}
     const prevKey = stockPicks.length
       ? (stockPicks[stockPicks.length - 1].asset?.previewUrl || stockPicks[stockPicks.length - 1].asset?.title || "")
       : "";
@@ -2048,13 +2238,21 @@ async function assignStockAssetsGlobally({ segments, mediaType, stockConfig, all
       }
     }
 
-    if (!finalAsset) continue;
+    // Helper to bail out of a segment iteration cleanly — fires onSegmentDone
+    // with null asset and onProgress so the UI segment marker turns red and
+    // ETA still moves forward.
+    const skipSegment = () => {
+      try { onSegmentDone?.(segment, null, Date.now() - segStartTs); } catch {}
+      onProgress?.(i + 1, segments.length);
+    };
+
+    if (!finalAsset) { skipSegment(); continue; }
 
     const maxReusePerAsset = caps[finalAsset.kind] || 0;
     const currentKey = finalAsset.previewUrl || finalAsset.title || "";
     const currentUsed = usageMap.get(currentKey) || 0;
 
-    if (maxReusePerAsset <= 0) continue;
+    if (maxReusePerAsset <= 0) { skipSegment(); continue; }
 
     if (currentUsed >= maxReusePerAsset || (prevKey && currentKey === prevKey)) {
       const rankedPool = finalAsset.kind === "video"
@@ -2086,10 +2284,10 @@ async function assignStockAssetsGlobally({ segments, mediaType, stockConfig, all
           finalReason = finalReason ? `${finalReason}+ai-fallback` : "ai-fallback";
           aiGeneratedCount += 1;
         } else {
-          continue;
+          skipSegment(); continue;
         }
       } else {
-        continue;
+        skipSegment(); continue;
       }
     }
 
@@ -2105,6 +2303,7 @@ async function assignStockAssetsGlobally({ segments, mediaType, stockConfig, all
       rankedImage
     });
 
+    try { onSegmentDone?.(segment, finalAsset, Date.now() - segStartTs); } catch {}
     onProgress?.(i + 1, segments.length);
   }
 
@@ -2638,6 +2837,9 @@ async function matchAssets() {
     setProgress("Підбір контенту", 2, "Підготовка");
     setWorkingState(true);
     resetRenderResult();
+    // Reset per-segment status badges so old runs don't bleed into the new one.
+    clearSegmentMatchStatuses();
+    for (const seg of state.segments) setSegmentMatchStatus(seg.id, "idle");
 
     if (mode === "local") {
       if ((el.localAnalyzeMode?.value || "cv") === "openai" && !el.openaiKey.value.trim()) {
@@ -2654,9 +2856,10 @@ async function matchAssets() {
         throw new Error("У local-режимі додай хоча б один image/video файл");
       }
 
-      setProgress("Підбір контенту", 12, "Аналіз локальних файлів");
+      setProgress("Підбір контенту", 12, `Аналіз ${files.length} локальних файлів...`);
       const { assets: analyzed, fallbackReason } = await analyzeLocalAssets(files);
       const byIndex = new Map(analyzed.map((item) => [item.fileIndex, item]));
+      setProgress("Підбір контенту", 18, `Проаналізовано ${analyzed.length} файлів`);
 
       state.localAssets = state.localAssets.map((asset) => {
         const ai = byIndex.get(asset.fileIndex);
@@ -2679,26 +2882,45 @@ async function matchAssets() {
         throw new Error("У вибраних локальних файлах не знайдено картинок. Додай .jpg/.png або зміни тип контенту.");
       }
 
+      const segCount = state.segments.length;
+      setProgress("Підбір контенту", 20, `AI-матчинг ${segCount} сегментів з ${state.localAssets.length} файлів...`);
       let aiMatches = new Map();
       try {
         aiMatches = await aiMatchLocalAssets({ segments: state.segments, assets: state.localAssets, mediaType });
       } catch {
         aiMatches = new Map();
       }
-      setProgress("Підбір контенту", 22, "CLIP-семантика");
+      setProgress("Підбір контенту", 23, `AI-матчинг готовий (${aiMatches.size}/${segCount})`);
 
       // CLIP-based embedding similarity (text↔image + text↔asset-text). Soft-fails
       // to token-only matching if Python/CLIP isn't ready. This is the main quality
       // upgrade — catches synonyms and visual matches the bag-of-words misses.
+      setProgress("Підбір контенту", 25, `CLIP-семантика для ${segCount} сегментів...`);
       let embedScores = new Map();
+      let embedFailed = false;
       try {
         embedScores = await embedMatchLocalAssets({ segments: state.segments, assets: state.localAssets });
+        if (embedScores.size === 0 && state.localAssets.some((a) => Array.isArray(a.framePaths) && a.framePaths.length)) {
+          embedFailed = true;
+        }
       } catch (e) {
         console.warn("embed-match failed, falling back to tokens:", e?.message || e);
         embedScores = new Map();
+        embedFailed = true;
+      }
+      if (embedFailed) {
+        // Surface this to the user instead of silently doing random picks.
+        // Without CLIP, all matches show "Tokens · 0.0" because text rarely
+        // overlaps lexically — the picker takes whatever frame comes first.
+        setProgress(
+          "Підбір контенту",
+          26,
+          "⚠️ CLIP не доступний — підбір на основі ключових слів (нижча якість). Перевстанови BLIP, щоб увімкнути семантику."
+        );
+        try { window.__lastEmbedWarning = Date.now(); } catch (_) {}
       }
 
-      setProgress("Підбір контенту", 28, "Пошук відповідностей");
+      setProgress("Підбір контенту", 28, `Підбір під ${segCount} сегментів...`);
 
       const localPicks = assignLocalAssetsGlobally({
         segments: state.segments,
@@ -2707,9 +2929,27 @@ async function matchAssets() {
         embedScores
       });
 
+      // Even though local picks are pre-computed (instant), we walk them with
+      // a small delay so the UI can show segments turning green one by one —
+      // gives the user visual feedback that work is happening per segment.
+      const t0 = Date.now();
+      const total = Math.max(1, localPicks.length);
       for (let i = 0; i < localPicks.length; i += 1) {
+        const tBefore = Date.now();
         rows.push(localPicks[i]);
-        setProgress("Підбір контенту", 30 + Math.round(((i + 1) / Math.max(1, localPicks.length)) * 65), "Локальний підбір");
+        const segId = localPicks[i].segment?.id;
+        if (segId != null) {
+          setSegmentMatchStatus(segId, "matched", {
+            ms: Date.now() - tBefore,
+            asset: localPicks[i].asset
+          });
+        }
+        const elapsed = (Date.now() - t0) / 1000;
+        const avg = elapsed / (i + 1);
+        const eta = Math.max(0, avg * (total - i - 1));
+        const pct = 30 + Math.round(((i + 1) / total) * 65);
+        setProgress("Підбір контенту", pct,
+          `Підібрано ${i + 1}/${total} · ${avg.toFixed(2)}с/сегмент · ETA ${eta < 60 ? `${eta.toFixed(0)}с` : `${(eta / 60).toFixed(1)}хв`}`);
       }
 
       if (fallbackReason) {
@@ -2788,6 +3028,7 @@ async function matchAssets() {
       const strictVision = isVisionApiMode() && Boolean(el.openaiKey.value.trim());
       const verificationMode = getStockVerificationMode();
       setProgress("Підбір контенту", 35, "Глобальний підбір зі стоків");
+      const tStock0 = Date.now();
       const stockPicks = await assignStockAssetsGlobally({
         segments: state.segments,
         mediaType,
@@ -2796,9 +3037,21 @@ async function matchAssets() {
         strictVision,
         reroll,
         verificationMode,
+        onSegmentStart: (segment) => {
+          if (segment?.id != null) setSegmentMatchStatus(segment.id, "matching");
+        },
+        onSegmentDone: (segment, asset, ms) => {
+          if (segment?.id != null) {
+            setSegmentMatchStatus(segment.id, asset ? "matched" : "failed", { ms, asset });
+          }
+        },
         onProgress: (done, total) => {
+          const elapsed = (Date.now() - tStock0) / 1000;
+          const avg = done > 0 ? elapsed / done : 0;
+          const eta = Math.max(0, avg * (total - done));
           const p = 35 + Math.round((done / Math.max(1, total)) * 55);
-          setProgress("Підбір контенту", p, "Перевірка/підбір кадрів");
+          setProgress("Підбір контенту", p,
+            `Сегмент ${done}/${total} · ${avg.toFixed(1)}с/сегмент · ETA ${eta < 60 ? `${eta.toFixed(0)}с` : `${(eta / 60).toFixed(1)}хв`}`);
         }
       });
       setProgress("Підбір контенту", 92, "Фіналізація підбору");
@@ -2871,7 +3124,7 @@ async function renderMontage() {
       imageAnimationStyle: String(el.imageAnimStyle?.value || "combo"),
       imageAnimationStrength: Number(el.imageAnimStrength?.value || 2),
       transitionPack: String(el.transitionPack?.value || "dynamic"),
-      transitionDuration: Number(el.transitionDuration?.value || 0.26),
+      transitionDuration: Number(el.transitionDuration?.value || 0.32),
       subtitlesEnabled: Boolean(el.subtitlesEnabled?.checked),
       proMontageMode: String(el.proMontageMode?.value || "auto"),
       proInsertDensity: String(el.proInsertDensity?.value || "medium"),
@@ -2886,9 +3139,15 @@ async function renderMontage() {
       proInsertChapterCard: Boolean(el.proInsertChapterCard?.checked),
       proInsertRedactedDoc: Boolean(el.proInsertRedactedDoc?.checked),
       proInsertTypewriter: Boolean(el.proInsertTypewriter?.checked),
+      proInsertAmbient: el.proInsertAmbient?.checked !== false,
+      proInsertProgressBar: el.proInsertProgressBar?.checked !== false,
+      proInsertQuoteBlock: el.proInsertQuoteBlock?.checked !== false,
+      proInsertAnimatedCounter: el.proInsertAnimatedCounter?.checked !== false,
       sfxEnabled: Boolean(el.sfxEnabled?.checked),
-      sfxVolume: Number(el.sfxVolume?.value || 0.85),
-      sfxPack: String(el.sfxPack?.value || "cinematic")
+      sfxVolume: Number(el.sfxVolume?.value || 1.1),
+      sfxPack: String(el.sfxPack?.value || "cinematic"),
+      musicEnabled: el.musicEnabled?.checked !== false,
+      musicVolume: Number(el.musicVolume?.value || 0.28)
     }));
 
     if (el.sourceMode.value === "local") {
@@ -3016,51 +3275,151 @@ async function runMiniMontage() {
 }
 
 async function runCutter() {
-  let stopTicker = null;
   try {
-    const youtubeUrl = String(el.cutYoutubeUrl?.value || "").trim();
-    const videoFile = el.cutVideoFile?.files?.[0] || null;
-    const useLocalFile = Boolean(videoFile);
-    if (!youtubeUrl && !videoFile) throw new Error("Додай YouTube-посилання або локальний відеофайл");
+    const youtubeUrlsRaw = String(el.cutYoutubeUrl?.value || "");
+    // Match URLs anywhere — handles separators "newline", "space", "tab",
+    // commas, or paste-on-one-line. Anything starting with http(s):// goes.
+    const youtubeUrls = (youtubeUrlsRaw.match(/https?:\/\/[^\s,;]+/gi) || [])
+      .map((s) => s.trim()).filter(Boolean);
+    const videoFiles = Array.from(el.cutVideoFile?.files || []);
+    const totalSources = youtubeUrls.length + videoFiles.length;
+    if (totalSources === 0) throw new Error("Додай YouTube-посилання або локальний відеофайл");
 
-    setCutStatus(useLocalFile ? "Нарізка: підготовка локального відео..." : "Нарізка: підготовка YouTube-відео...");
+    const initStatus = totalSources > 1
+      ? `Нарізка: ${totalSources} джерел у черзі...`
+      : (videoFiles.length ? "Нарізка: підготовка локального відео..." : "Нарізка: підключення до YouTube...");
+    setCutStatus(initStatus);
     if (el.cutRunBtn) el.cutRunBtn.disabled = true;
     resetCutResults();
+    showCutProgress(0, `Старт... · ${totalSources} джерел${totalSources > 1 ? "" : "о"}`);
 
     const segmentSeconds = getCutSegmentSeconds();
-    const duration = useLocalFile ? await getLocalVideoDuration(videoFile) : 0;
-    const estimatedSegments = duration ? Math.max(1, Math.ceil(duration / segmentSeconds)) : 0;
     const form = new FormData();
-    if (videoFile) {
-      form.append("videoFile", videoFile);
-    } else if (youtubeUrl) {
-      form.append("youtubeUrl", youtubeUrl);
-    }
+    for (const file of videoFiles) form.append("videoFile", file);
+    if (youtubeUrls.length) form.append("youtubeUrls", youtubeUrls.join("\n"));
     form.append("segmentSeconds", String(segmentSeconds));
     form.append("projectLabel", String(el.cutProjectLabel?.value || "").trim());
     form.append("namingMode", String(el.cutNamingMode?.value || "auto"));
     form.append("captionMode", String(el.cutCaptionMode?.value || "blip"));
 
-    let tickerStarted = false;
-    const data = await postFormJsonWithUploadProgress("/api/cutter/run", form, "Нарізка", (upload) => {
-      const percent = Math.min(100, Math.max(0, Math.round(upload)));
-      if (percent < 100) {
-        setCutStatus(`Нарізка: завантаження ${percent}%${estimatedSegments ? `. Далі ${estimatedSegments} фрагментів.` : ""}`);
-        return;
-      }
-      if (!tickerStarted) {
-        tickerStarted = true;
-        stopTicker = startCutterTicker(estimatedSegments);
-        if (!estimatedSegments) setCutStatus("Нарізка: відео завантажено, йде нарізка...");
-      }
-    });
-    renderCutResults(data);
-    setCutStatus(`Нарізка: 100%. Фрагментів: ${Number(data.clipsCount || 0)}.`);
+    const finalData = await streamCutterRun(form, totalSources);
+    if (!finalData) throw new Error("Сервер не повернув результат");
+    renderCutResults(finalData);
+    setCutStatus(`Готово. Кліпів: ${Number(finalData.clipsCount || 0)} з ${Number(finalData.sourceCount || totalSources)} джерел.`);
+    showCutProgress(100, `Готово · ${Number(finalData.clipsCount || 0)} кліпів з ${Number(finalData.sourceCount || totalSources)} джерел`);
   } catch (error) {
     setCutStatus(error.message || "Помилка нарізки", true);
+    showCutProgress(0, error.message || "Помилка нарізки", true);
   } finally {
-    if (stopTicker) stopTicker();
     if (el.cutRunBtn) el.cutRunBtn.disabled = false;
+  }
+}
+
+// Streams NDJSON progress events from /api/cutter/run and updates the
+// progress bar. Returns the final {stage:"done", ...} payload.
+async function streamCutterRun(form, totalSources) {
+  const resp = await fetch("/api/cutter/run", { method: "POST", body: form });
+  if (!resp.ok || !resp.body) {
+    let msg = `Нарізка: помилка ${resp.status}`;
+    try { const j = await resp.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalData = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let evt;
+      try { evt = JSON.parse(trimmed); } catch { continue; }
+      handleCutterEvent(evt, totalSources);
+      if (evt.stage === "done") finalData = evt;
+      if (evt.stage === "error") throw new Error(evt.error || "Помилка нарізки");
+    }
+  }
+  return finalData;
+}
+
+// Per-source progress: each source spans (95% / N) of the total bar. Within a
+// source: download 0-60%, analyze 62%, cutting 65-95%. Then move to next source.
+function handleCutterEvent(evt, totalSources) {
+  const safeTotal = Math.max(1, Number(totalSources || 1));
+  const source = Math.max(1, Number(evt.source || 1));
+  const sourceSpan = 95 / safeTotal;
+  const sourceStart = (source - 1) * sourceSpan;
+  const sourceLabel = safeTotal > 1 ? `[${source}/${safeTotal}] ` : "";
+
+  switch (evt.stage) {
+    case "download": {
+      const pctWithin = Math.round((Number(evt.percent || 0) / 100) * sourceSpan * 0.6);
+      showCutProgress(Math.round(sourceStart + pctWithin), `${sourceLabel}📥 Завантаження YouTube · ${(evt.percent || 0).toFixed(1)}%`);
+      setCutStatus(evt.message || `Завантаження ${(evt.percent || 0).toFixed(1)}%`);
+      break;
+    }
+    case "analyze": {
+      showCutProgress(Math.round(sourceStart + sourceSpan * 0.62), `${sourceLabel}🔍 Аналіз...`);
+      setCutStatus(evt.message || "Аналіз відео...");
+      break;
+    }
+    case "cutting": {
+      const total = Math.max(1, Number(evt.clipTotal || 1));
+      const done = Number(evt.clipDone || 0);
+      const within = sourceSpan * 0.65 + (done / total) * sourceSpan * 0.3;
+      showCutProgress(Math.round(sourceStart + within), `${sourceLabel}✂️ Нарізка ${done}/${total}`);
+      setCutStatus(evt.message || `Кліп ${done}/${total}`);
+      break;
+    }
+    case "warn": {
+      setCutStatus(evt.message || "", true);
+      break;
+    }
+    case "packaging": {
+      showCutProgress(97, "📦 Пакую zip...");
+      setCutStatus(evt.message || "Пакування...");
+      break;
+    }
+    case "done": {
+      showCutProgress(100, `✅ Готово · ${Number(evt.clipsCount || 0)} кліпів`);
+      break;
+    }
+    case "error":
+      break;
+    default: break;
+  }
+}
+
+// Renders/updates the cutter progress bar. Lives inline above cutResults.
+function showCutProgress(percent, label, isError = false) {
+  const wrap = el.cutResults?.parentNode;
+  if (!wrap) return;
+  let bar = document.getElementById("cutProgressBar");
+  if (!bar) {
+    const card = document.createElement("div");
+    card.id = "cutProgressCard";
+    card.style.cssText = "margin: 10px 0; padding: 12px 14px; border-radius: 12px; background: #f3f8fc; border: 1px solid #d2e0eb;";
+    card.innerHTML = `
+      <div id="cutProgressLabel" style="font-size: 13px; color: #4e6479; margin-bottom: 6px;">Старт...</div>
+      <div style="background: #d2e0eb; border-radius: 6px; height: 8px; overflow: hidden;">
+        <div id="cutProgressBar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+      </div>`;
+    wrap.insertBefore(card, el.cutResults);
+    bar = document.getElementById("cutProgressBar");
+  }
+  const labelEl = document.getElementById("cutProgressLabel");
+  if (labelEl) {
+    labelEl.textContent = label || "";
+    labelEl.style.color = isError ? "#dc2626" : "#4e6479";
+  }
+  if (bar) {
+    bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+    bar.style.background = isError ? "#dc2626" : "var(--accent)";
   }
 }
 
@@ -3317,7 +3676,10 @@ async function refreshBlipStatus() {
   try {
     const data = await fetch("/api/blip/status").then((r) => r.json());
     if (data.installed) {
-      blipUi.status.textContent = "✅ BLIP встановлено — локальний аналіз готовий до роботи";
+      const label = data.mode === "dev"
+        ? "✅ BLIP активний (dev режим — .venv-blip з проєкту)"
+        : "✅ BLIP встановлено — локальний AI-аналіз готовий до роботи";
+      blipUi.status.textContent = label;
       blipUi.actions.classList.add("hidden");
       blipUi.progressWrap.classList.add("hidden");
       return true;
@@ -3327,13 +3689,10 @@ async function refreshBlipStatus() {
       blipUi.actions.classList.add("hidden");
       blipUi.progressWrap.classList.remove("hidden");
       blipUi.progressBar.style.width = `${data.progress}%`;
-      // Reconnect to the SSE log stream is non-trivial; tail the snapshot instead.
       blipUi.progressLog.textContent = `${data.progress}% — установка триває у фоні...`;
       return false;
     }
-    blipUi.status.textContent = data.location.includes("dev mode")
-      ? "ℹ️ Dev режим — використовується .venv-blip з проєкту"
-      : "BLIP не встановлено. Він потрібен тільки для локального AI-аналізу файлів.";
+    blipUi.status.textContent = "BLIP не встановлено. Він потрібен тільки для локального AI-аналізу файлів.";
     blipUi.actions.classList.remove("hidden");
     blipUi.progressWrap.classList.add("hidden");
     if (data.error) {
@@ -3436,3 +3795,152 @@ updateCutSegmentUi();
 switchMainTab("autopilot");
 updateLocalFilesSummary();
 refreshBlipStatus();
+
+// ─── Save / Load project ──────────────────────────────────────────────────
+// Snapshots the entire session (transcript, segments, picks, settings) to a
+// .vss JSON file so the user can resume work later. The audio file itself is
+// NOT embedded (would be huge); instead we record its filename and prompt the
+// user to re-upload the same file when loading. Stock URLs survive verbatim.
+function saveProject() {
+  try {
+    const audioName = el.audioFile?.files?.[0]?.name || "";
+    const project = {
+      schema: "vss-project",
+      version: 1,
+      savedAt: new Date().toISOString(),
+      audioName,
+      fullText: state.fullText || "",
+      segments: state.segments || [],
+      currentMatches: (state.currentMatches || []).map((m) => ({
+        segment: m.segment,
+        asset: m.asset,
+        query: m.query,
+        reason: m.reason
+      })),
+      uiSettings: typeof getUiSettingsSnapshot === "function" ? getUiSettingsSnapshot() : null
+    };
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+    const baseName = audioName ? audioName.replace(/\.[a-z0-9]+$/i, "") : "project";
+    a.href = url;
+    a.download = `${baseName}-${stamp}.vss`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    setStatus(`Проєкт збережено · ${a.download}`);
+  } catch (e) {
+    setStatus(`Помилка збереження: ${e.message}`, true);
+  }
+}
+
+// Snapshot all UI settings (for save). Re-uses getState if available so we
+// always include every setting the app cares about.
+function getUiSettingsSnapshot() {
+  if (typeof getState === "function") return getState();
+  return null;
+}
+
+async function loadProjectFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const project = JSON.parse(text);
+    if (project.schema !== "vss-project") throw new Error("Не схожий на VSS-проєкт");
+
+    state.fullText = String(project.fullText || "");
+    state.segments = Array.isArray(project.segments) ? project.segments : [];
+    state.currentMatches = Array.isArray(project.currentMatches) ? project.currentMatches : [];
+
+    if (project.uiSettings && typeof restoreUiSettings === "function") {
+      try {
+        localStorage.setItem("vss_ui_settings", JSON.stringify(project.uiSettings));
+        restoreUiSettings();
+      } catch { /* ignore */ }
+    }
+
+    renderSegments();
+    renderMatches(state.currentMatches);
+    if (typeof updateButtonsState === "function") updateButtonsState();
+
+    const note = project.audioName
+      ? `Проєкт відкрито. Завантаж аудіо "${project.audioName}" якщо хочеш робити рендер.`
+      : "Проєкт відкрито.";
+    setStatus(note);
+  } catch (e) {
+    setStatus(`Помилка завантаження проєкту: ${e.message}`, true);
+  }
+}
+
+document.getElementById("saveProjectBtn")?.addEventListener("click", saveProject);
+document.getElementById("loadProjectBtn")?.addEventListener("click", () => {
+  document.getElementById("loadProjectFile")?.click();
+});
+document.getElementById("loadProjectFile")?.addEventListener("change", (evt) => {
+  const file = evt.target.files?.[0];
+  if (file) loadProjectFile(file);
+  evt.target.value = "";
+});
+
+// ─── Auto-update check ────────────────────────────────────────────────────
+// Hits GitHub's public Releases API on startup, compares with the version
+// baked at build time (hardcoded constant updated per release).
+const CURRENT_APP_VERSION = "1.1.0";
+const GITHUB_RELEASES_API = "https://api.github.com/repos/vladsotnikov/fr1ge-studio/releases/latest";
+const UPDATE_DISMISS_KEY = "vss_update_dismissed_for";
+
+function semverCompare(a, b) {
+  // Returns >0 if a > b, <0 if a < b, 0 if equal. Strips leading "v".
+  const norm = (s) => String(s || "").replace(/^v/, "").split(/[.-]/).map((x) => parseInt(x, 10) || 0);
+  const av = norm(a);
+  const bv = norm(b);
+  for (let i = 0; i < Math.max(av.length, bv.length); i += 1) {
+    const ai = av[i] || 0;
+    const bi = bv[i] || 0;
+    if (ai !== bi) return ai - bi;
+  }
+  return 0;
+}
+
+async function checkForUpdates() {
+  const banner = document.getElementById("updateBanner");
+  if (!banner) return;
+  try {
+    const resp = await fetch(GITHUB_RELEASES_API, { cache: "no-store" });
+    if (!resp.ok) return;  // network error / rate limit → silent
+    const data = await resp.json();
+    const latestTag = String(data.tag_name || "").trim();
+    if (!latestTag) return;
+    if (semverCompare(latestTag, CURRENT_APP_VERSION) <= 0) return;  // we're up to date
+    if (localStorage.getItem(UPDATE_DISMISS_KEY) === latestTag) return;  // user dismissed this version
+
+    // Pick the right asset for this platform.
+    const ua = navigator.userAgent;
+    let preferredAsset = null;
+    if (/Mac OS X/i.test(ua)) {
+      preferredAsset = (data.assets || []).find((a) => /-arm64\.dmg$/i.test(a.name))
+        || (data.assets || []).find((a) => /\.dmg$/i.test(a.name));
+    } else if (/Windows/i.test(ua)) {
+      preferredAsset = (data.assets || []).find((a) => /\.exe$/i.test(a.name));
+    }
+    const dlUrl = preferredAsset?.browser_download_url || data.html_url;
+
+    document.getElementById("updateVersionLabel").textContent = latestTag;
+    const dlBtn = document.getElementById("updateDownloadBtn");
+    if (dlBtn) dlBtn.href = dlUrl;
+    const notes = String(data.body || "").trim().split("\n").slice(0, 2).join(" · ").slice(0, 200);
+    if (notes) document.getElementById("updateNotes").textContent = notes;
+    banner.classList.remove("hidden");
+
+    document.getElementById("updateDismissBtn").addEventListener("click", () => {
+      localStorage.setItem(UPDATE_DISMISS_KEY, latestTag);
+      banner.classList.add("hidden");
+    }, { once: true });
+  } catch (e) {
+    // Silent fail — auto-update is a nice-to-have, never block the app.
+    console.warn("Update check failed:", e?.message || e);
+  }
+}
+// Defer check by 2s so it doesn't compete with first paint.
+setTimeout(checkForUpdates, 2000);

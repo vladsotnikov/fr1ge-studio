@@ -122,6 +122,18 @@ def main() -> int:
         except Exception:
             pass
 
+    def _to_tensor(out):
+        # transformers 4.x: get_*_features returns Tensor.
+        # transformers 5.x: may return BaseModelOutputWithPooling — pull
+        # pooler_output (or last_hidden_state[:,0] as fallback).
+        if hasattr(out, "cpu"):
+            return out
+        if hasattr(out, "pooler_output") and out.pooler_output is not None:
+            return out.pooler_output
+        if hasattr(out, "last_hidden_state"):
+            return out.last_hidden_state[:, 0, :]
+        raise RuntimeError(f"unexpected feature type: {type(out).__name__}")
+
     def embed_text(s: str):
         s = (s or "").strip()
         if not s:
@@ -132,7 +144,14 @@ def main() -> int:
             return cached
         with torch.no_grad():
             inp = processor(text=[s[:480]], return_tensors="pt", padding=True, truncation=True).to(device)
-            v = model.get_text_features(**inp).cpu().numpy()[0]
+            try:
+                feat = model.get_text_features(**inp)
+            except Exception:
+                # transformers 5.x path — call submodels and project manually.
+                txt_out = model.text_model(**inp)
+                pooled = txt_out.pooler_output if hasattr(txt_out, "pooler_output") else txt_out[1]
+                feat = model.text_projection(pooled)
+            v = _to_tensor(feat).cpu().numpy()[0]
             v = v / (np.linalg.norm(v) + 1e-9)
         cache_save(f"txt_{key}", v)
         return v
@@ -150,7 +169,13 @@ def main() -> int:
             return None
         with torch.no_grad():
             inp = processor(images=img, return_tensors="pt").to(device)
-            v = model.get_image_features(**inp).cpu().numpy()[0]
+            try:
+                feat = model.get_image_features(**inp)
+            except Exception:
+                vis_out = model.vision_model(**inp)
+                pooled = vis_out.pooler_output if hasattr(vis_out, "pooler_output") else vis_out[1]
+                feat = model.visual_projection(pooled)
+            v = _to_tensor(feat).cpu().numpy()[0]
             v = v / (np.linalg.norm(v) + 1e-9)
         cache_save(f"img_{key}", v)
         return v

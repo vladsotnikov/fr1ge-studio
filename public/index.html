@@ -13,6 +13,18 @@
       <button id="tabCutter" class="tab-btn" type="button">Нарізка</button>
     </div>
 
+    <!-- Update notification banner — populated by checkForUpdates() if newer release exists -->
+    <div id="updateBanner" class="hidden" style="margin: 8px 0; padding: 12px 16px; border-radius: 12px; background: linear-gradient(135deg, #f0f6ff, #e8f2ff); border: 1px solid #c8d8f0; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+      <div>
+        <strong>📦 Доступне оновлення</strong> <span id="updateVersionLabel" style="color: var(--accent);"></span>
+        <span class="muted" id="updateNotes" style="display: block; font-size: 13px; margin-top: 2px;"></span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <a id="updateDownloadBtn" href="#" target="_blank" class="local-btn" style="background: var(--accent); color: white; border-color: var(--accent);">Завантажити</a>
+        <button type="button" id="updateDismissBtn" class="local-btn local-btn-clear">Пізніше</button>
+      </div>
+    </div>
+
     <header class="hero">
       <p class="kicker" id="heroKicker">FR1GE Studio</p>
       <h1 id="heroTitle">Відео Автопілот</h1>
@@ -220,7 +232,7 @@
           <div class="grid">
             <label class="field-label">
               Тривалість переходу (сек)
-              <input id="transitionDuration" type="number" min="0.08" max="0.8" step="0.02" value="0.26">
+              <input id="transitionDuration" type="number" min="0.08" max="0.8" step="0.02" value="0.32">
             </label>
             <label class="field-label checkbox-label">
               <input id="subtitlesEnabled" type="checkbox" checked>
@@ -323,15 +335,43 @@
                 <span class="muted">Друкований факт на картці</span>
               </span>
             </label>
+            <label class="insert-toggle insert-toggle-special">
+              <input id="proInsertAmbient" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>🎨 Ambient декор</strong>
+                <span class="muted">Photo Frame / Split / Typewriter постійно — як у звичайному монтажі</span>
+              </span>
+            </label>
+            <label class="insert-toggle">
+              <input id="proInsertProgressBar" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>📊 Progress Bar</strong>
+                <span class="muted">Анімована шкала-заливка під цифри і статистику</span>
+              </span>
+            </label>
+            <label class="insert-toggle">
+              <input id="proInsertQuoteBlock" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>❝ Quote Block</strong>
+                <span class="muted">Велика картка з декоративними лапками</span>
+              </span>
+            </label>
+            <label class="insert-toggle">
+              <input id="proInsertAnimatedCounter" type="checkbox" checked>
+              <span class="insert-toggle-body">
+                <strong>🔢 Animated Counter</strong>
+                <span class="muted">Цифра яка рахує до цільового значення</span>
+              </span>
+            </label>
           </div>
           <div class="grid">
             <label class="field-label checkbox-label">
-              <input id="sfxEnabled" type="checkbox" checked>
+              <input id="sfxEnabled" type="checkbox">
               Звукове оформлення вставок
             </label>
             <label class="field-label">
               Гучність SFX
-              <input id="sfxVolume" type="number" min="0" max="1.5" step="0.05" value="0.85">
+              <input id="sfxVolume" type="number" min="0" max="1.8" step="0.05" value="1.1">
             </label>
           </div>
           <div class="grid">
@@ -342,6 +382,16 @@
                 <option value="subtle">Subtle (тонше)</option>
                 <option value="minimal">Minimal (тільки удари)</option>
               </select>
+            </label>
+          </div>
+          <div class="grid">
+            <label class="field-label checkbox-label">
+              <input id="musicEnabled" type="checkbox" checked>
+              🎵 Фонова музика (синтезована під настрій)
+            </label>
+            <label class="field-label">
+              Гучність музики
+              <input id="musicVolume" type="number" min="0" max="0.6" step="0.02" value="0.28">
             </label>
           </div>
         </div>
@@ -372,6 +422,11 @@
           <button id="autopilotBtn" type="button" class="autopilot-btn">
             <span class="autopilot-icon">⚡</span> Автопілот
           </button>
+        </div>
+        <div class="local-file-actions" style="margin-top: 8px; justify-content: flex-end;">
+          <button type="button" class="local-btn" id="saveProjectBtn" title="Зберегти всю сесію (сегменти, підбір, налаштування) у .vss файл">💾 Зберегти проєкт</button>
+          <button type="button" class="local-btn" id="loadProjectBtn" title="Завантажити проєкт з .vss файлу">📂 Відкрити проєкт</button>
+          <input id="loadProjectFile" type="file" accept=".vss,application/json" class="hidden">
         </div>
       </div>
 
@@ -453,14 +508,15 @@
           </div>
           <div class="grid">
             <label class="field-label">
-              YouTube-посилання (опц.)
-              <input id="cutYoutubeUrl" type="url" placeholder="https://www.youtube.com/watch?v=...">
+              YouTube-посилання (можна декілька, кожне з нового рядка)
+              <textarea id="cutYoutubeUrl" rows="3" placeholder="https://www.youtube.com/watch?v=...&#10;https://youtu.be/..."></textarea>
             </label>
             <label class="field-label">
-              Або локальний відеофайл
-              <input id="cutVideoFile" type="file" accept="video/*">
+              Локальні відеофайли (можна декілька)
+              <input id="cutVideoFile" type="file" accept="video/*" multiple>
             </label>
           </div>
+          <p class="muted tiny" style="margin: 6px 2px 0;">Усі джерела (YouTube + локальні) обробляться послідовно і складуться в одну спільну папку.</p>
         </div>
 
         <!-- Група 2: Параметри нарізки -->

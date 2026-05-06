@@ -13,7 +13,7 @@ import { spawn } from "child_process";
 const app = express();
 const upload = multer({
   limits: {
-    fileSize: 250 * 1024 * 1024,
+    fileSize: 2 * 1024 * 1024 * 1024,  // 2 GB — covers most video files used as transcription source
     fieldSize: 220 * 1024 * 1024,
     fields: 5000
   }
@@ -383,6 +383,68 @@ function runCommand(command, args, options = {}) {
   });
 }
 
+// Streaming variant of runCommand: invokes onLine(text, channel) for every
+// complete stdout/stderr line. Useful for parsing yt-dlp/ffmpeg progress.
+function runCommandStreamed(command, args, onLine, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: options.env ? { ...process.env, ...options.env } : process.env
+    });
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    let stderrAll = "";
+    let settled = false;
+    const timeoutMs = Number(options.timeoutMs || 0);
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          child.kill("SIGKILL");
+          reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs)
+      : null;
+
+    const flush = (buf, chan) => {
+      const lines = buf.split(/\r?\n|\r/);
+      const remainder = lines.pop() || "";
+      for (const line of lines) {
+        if (line) try { onLine?.(line, chan); } catch { /* ignore listener errors */ }
+      }
+      return remainder;
+    };
+
+    child.stdout.on("data", (chunk) => {
+      stdoutBuf += chunk.toString();
+      stdoutBuf = flush(stdoutBuf, "stdout");
+    });
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderrAll += text;
+      stderrBuf += text;
+      stderrBuf = flush(stderrBuf, "stderr");
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      // Flush any final partial line.
+      if (stdoutBuf) try { onLine?.(stdoutBuf, "stdout"); } catch {}
+      if (stderrBuf) try { onLine?.(stderrBuf, "stderr"); } catch {}
+      if (code === 0) resolve({ stderr: stderrAll });
+      else reject(new Error(`${command} exited with code ${code}: ${stderrAll.slice(-1000)}`));
+    });
+  });
+}
+
 let ffmpegChecked = false;
 let ffmpegBin = "ffmpeg";
 let ffprobeBin = "ffprobe";
@@ -557,6 +619,24 @@ async function ensureYtDlpAvailable() {
   if (ytDlpChecked) return;
 
   const home = os.homedir();
+  const bundledSubdir =
+    process.platform === "darwin" ? "macos" :
+    process.platform === "win32"  ? "win32-x64" :
+                                    "linux-x64";
+  const bundledFilename = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+  const bundledYtDlp = path.join(__dirname, "tools", "yt-dlp", bundledSubdir, bundledFilename);
+
+  // Fast-path: trust the bundled binary if it exists. Skipping --version saves
+  // ~12s on macOS where PyInstaller-frozen binaries have huge cold-start.
+  try {
+    const stat = await fs.stat(bundledYtDlp);
+    if (stat.isFile()) {
+      ytDlpBin = bundledYtDlp;
+      ytDlpChecked = true;
+      return;
+    }
+  } catch { /* not bundled — fall through to discovery */ }
+
   const staticCandidates = [
     process.env.YT_DLP_BIN,
     "/opt/homebrew/bin/yt-dlp",
@@ -778,8 +858,12 @@ function compressRepeatedSceneText(text = "") {
 
 function normalizeSceneCandidateText(text = "") {
   return compressRepeatedSceneText(String(text || ""))
-    .replace(/\b(the image shows|this image shows|there is|there are|a picture of|an image of)\b/gi, "")
-    .replace(/\b(on the bottom of the image|in the image|in the picture|in the background)\b/gi, "")
+    // Strip BLIP medium/style prefixes — user wants the SUBJECT, not the format.
+    // "a black and white photo of soldiers" → "soldiers"
+    .replace(/^\s*(?:a |an |the )?(?:black and white|colou?red|vintage|old|grainy|blurry|sepia|low quality|high quality|close[- ]up|wide[- ]angle|aerial)\s+(?:photo|photograph|image|picture|shot|view|footage|film|video|scene)\s+of\s+/gi, "")
+    .replace(/^\s*(?:a |an |the )?(?:photo|photograph|image|picture|shot|view|footage|film|video|scene|screenshot|still)\s+of\s+/gi, "")
+    .replace(/\b(the image shows|this image shows|there is|there are|a picture of|an image of|a photo of|a photograph of|a screenshot of)\b/gi, "")
+    .replace(/\b(on the bottom of the image|in the image|in the picture|in the background|in black and white|in sepia)\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1158,9 +1242,18 @@ function makePlainCutTitleFromCaption(caption = "") {
 }
 
 function makeRawBlipCutTitle(blipCaption = "", blipCaptions = []) {
-  const raw = String(blipCaption || "")
-    || (Array.isArray(blipCaptions) ? blipCaptions.map((x) => String(x || "").trim()).filter(Boolean).join(". ") : "");
-  const title = String(raw || "")
+  // Pick ONE caption only — never concatenate captions from different frames.
+  // Concatenation produces Frankenstein titles like
+  //   "close-old-typewriter-m...it-tie-singing-into"
+  // mashing 3 unrelated frame descriptions into one filename.
+  const candidates = [blipCaption, ...(Array.isArray(blipCaptions) ? blipCaptions : [])]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .filter((item, idx, arr) => arr.indexOf(item) === idx)
+    .filter((item) => !isBadSceneTitleText(item));
+  // Prefer the first non-generic caption; fall back to the first non-empty.
+  const picked = candidates.find((item) => !isGenericSceneCandidate(item)) || candidates[0] || "";
+  const title = picked
     .replace(/\s+/g, " ")
     .replace(/\s*\.\s*/g, ". ")
     .replace(/\.+$/g, "")
@@ -1355,19 +1448,313 @@ async function runEmbedMatch(payload, { timeoutMs = 600000 } = {}) {
   });
 }
 
-async function describeFramesWithBlip(framePaths = []) {
+// Persistent BLIP daemon pool. Spawns N daemon workers, each holding its own
+// copy of the model in memory. Requests route to the daemon with the shortest
+// pending queue → real parallelism for batch analyses.
+//
+// Why a pool: a single daemon with one stdin stream serializes all requests.
+// With ANALYZE_CONCURRENCY=4 file workers, BLIP becomes the bottleneck.
+// Multiple daemons run in parallel, each ~700 MB RAM.
+//
+// Auto-tuned by available RAM. Beyond ~4 daemons the MPS GPU saturates
+// and additional copies just contend without throughput gain. User can
+// override via BLIP_DAEMON_COUNT env var.
+//
+// Each daemon uses MPS (Apple Metal) when available — 5-10× faster than
+// CPU on M-series — and batches all frames of one request through a single
+// model.generate call.
+function defaultBlipDaemonCount() {
+  // 4 daemons give 3-4× throughput on multi-file analyze workloads.
+  // Previous deadlocks were caused by SIMULTANEOUS load — fixed by:
+  //   1. staggered spawn (wait for each to print "ready" before spawning next)
+  //   2. safetensors load instead of .bin (faster, less IO contention)
+  // RAM-aware: 1 daemon per ~1.5GB of free RAM after baseline.
+  const totalGB = os.totalmem() / (1024 * 1024 * 1024);
+  const headroom = Math.max(0, totalGB - 4);
+  const fromRam = Math.floor(headroom / 1.5);
+  return Math.max(1, Math.min(4, fromRam));
+}
+const BLIP_DAEMON_COUNT = Math.max(
+  1,
+  Math.min(6, Number(process.env.BLIP_DAEMON_COUNT) || defaultBlipDaemonCount())
+);
+const blipDaemons = [];            // Array of { process, stdoutBuf, resolvers, ready }
+let blipPoolReady = null;          // Promise resolved once all daemons booted
+
+async function spawnBlipDaemon(py, daemonScript, idx) {
+  const daemon = {
+    process: null,
+    stdoutBuf: "",
+    resolvers: [],
+    ready: null,
+    device: "",
+    idx
+  };
+  daemon.ready = new Promise((resolveReady, rejectReady) => {
+    const child = spawn(py, [daemonScript], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: getPythonSafeEnv()
+    });
+    daemon.process = child;
+
+    child.stdout.on("data", (chunk) => {
+      daemon.stdoutBuf += chunk.toString();
+      let nl;
+      while ((nl = daemon.stdoutBuf.indexOf("\n")) >= 0) {
+        const line = daemon.stdoutBuf.slice(0, nl).trim();
+        daemon.stdoutBuf = daemon.stdoutBuf.slice(nl + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.ready) {
+          daemon.device = String(msg.device || "");
+          resolveReady(daemon);
+          continue;
+        }
+        const pending = daemon.resolvers.shift();
+        if (pending) pending.resolve(msg);
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(`[blip-daemon-${idx}] ${chunk}`);
+    });
+
+    child.on("exit", (code) => {
+      const reason = new Error(`BLIP daemon ${idx} exited (${code})`);
+      for (const r of daemon.resolvers) r.reject(reason);
+      daemon.resolvers = [];
+      daemon.process = null;
+      // Remove from active pool so future requests skip this slot.
+      const at = blipDaemons.indexOf(daemon);
+      if (at >= 0) blipDaemons.splice(at, 1);
+      if (code !== 0) rejectReady(reason);
+    });
+
+    child.on("error", (err) => {
+      daemon.process = null;
+      rejectReady(err);
+    });
+  });
+  return daemon;
+}
+
+async function ensureBlipDaemon() {
+  if (blipPoolReady) return blipPoolReady;
   const py = await ensureBlipAvailable();
-  if (!py || !blipScriptPath || !Array.isArray(framePaths) || !framePaths.length) {
+  if (!py) return null;
+
+  const daemonScript = path.join(__dirname, "tools", "blip_daemon.py");
+  try {
+    await fs.access(daemonScript);
+  } catch {
+    return null;
+  }
+
+  blipPoolReady = (async () => {
+    // Spawn STAGGERED — wait for each daemon to finish loading the model
+    // before spawning the next. Concurrent loads contend on MPS / page cache
+    // and can deadlock with all daemons hung at 130MB indefinitely.
+    const spawned = [];
+    for (let i = 0; i < BLIP_DAEMON_COUNT; i += 1) {
+      const d = await spawnBlipDaemon(py, daemonScript, i);
+      try { await d.ready; } catch { /* daemon failed — fall through and skip */ }
+      spawned.push(d);
+    }
+    for (const d of spawned) if (d.process) blipDaemons.push(d);
+    if (!blipDaemons.length) throw new Error("No BLIP daemons came online");
+    if (process.env.NODE_ENV !== "test") {
+      console.log(`[blip] daemon pool ready: ${blipDaemons.length}× ${blipDaemons[0]?.device || "?"}`);
+    }
+    return blipDaemons;
+  })().catch((err) => {
+    blipPoolReady = null;
+    throw err;
+  });
+
+  try {
+    await blipPoolReady;
+    return blipDaemons;
+  } catch {
+    return null;
+  }
+}
+
+// Route to the daemon with the fewest pending requests. Ties resolved by
+// daemon index → consistent assignment helps cache locality.
+function pickLeastBusyDaemon() {
+  if (!blipDaemons.length) return null;
+  let best = blipDaemons[0];
+  for (const d of blipDaemons) if (d.resolvers.length < best.resolvers.length) best = d;
+  return best;
+}
+
+async function describeFramesWithDaemon(framePaths) {
+  const daemon = pickLeastBusyDaemon();
+  if (!daemon || !daemon.process) throw new Error("BLIP daemon not available");
+  return new Promise((resolve, reject) => {
+    daemon.resolvers.push({ resolve, reject });
+    try {
+      daemon.process.stdin.write(JSON.stringify({ paths: framePaths }) + "\n");
+    } catch (err) {
+      daemon.resolvers = daemon.resolvers.filter((r) => r.resolve !== resolve);
+      reject(err);
+    }
+  });
+}
+
+// ─── Request coalescing: combine frames from multiple files into one daemon
+// call. GPU is most efficient with bigger batches — 32 frames in one forward
+// pass beats 8 separate 4-frame calls by 3-5×. We collect requests for up to
+// 40 ms or until we have 8 file-groups queued, then dispatch.
+const BLIP_COALESCE_MS = 40;
+const BLIP_COALESCE_MAX_GROUPS = 8;
+const BLIP_COALESCE_MAX_FRAMES = 48;
+let blipCoalesceQueue = [];        // [{paths, resolve, reject}, ...]
+let blipCoalesceTimer = null;
+
+function flushBlipCoalesceQueue() {
+  if (blipCoalesceTimer) { clearTimeout(blipCoalesceTimer); blipCoalesceTimer = null; }
+  if (!blipCoalesceQueue.length) return;
+  const batch = blipCoalesceQueue.splice(0, BLIP_COALESCE_MAX_GROUPS);
+
+  const allPaths = [];
+  const groups = [];
+  for (const item of batch) {
+    allPaths.push(...item.paths);
+    groups.push(item.paths.length);
+  }
+
+  const daemon = pickLeastBusyDaemon();
+  if (!daemon || !daemon.process) {
+    const err = new Error("BLIP daemon not available");
+    for (const item of batch) item.reject(err);
+    return;
+  }
+
+  daemon.resolvers.push({
+    resolve: (msg) => {
+      const results = Array.isArray(msg.groups) ? msg.groups : [];
+      for (let i = 0; i < batch.length; i += 1) {
+        const r = results[i] || { caption: "", captions: [] };
+        batch[i].resolve(r);
+      }
+    },
+    reject: (err) => {
+      for (const item of batch) item.reject(err);
+    }
+  });
+  try {
+    daemon.process.stdin.write(JSON.stringify({ paths: allPaths, groups }) + "\n");
+  } catch (err) {
+    daemon.resolvers.pop();
+    for (const item of batch) item.reject(err);
+  }
+}
+
+function describeFramesCoalesced(framePaths) {
+  return new Promise((resolve, reject) => {
+    blipCoalesceQueue.push({ paths: framePaths, resolve, reject });
+    const totalFrames = blipCoalesceQueue.reduce((a, q) => a + q.paths.length, 0);
+    if (blipCoalesceQueue.length >= BLIP_COALESCE_MAX_GROUPS || totalFrames >= BLIP_COALESCE_MAX_FRAMES) {
+      flushBlipCoalesceQueue();
+      return;
+    }
+    if (!blipCoalesceTimer) {
+      blipCoalesceTimer = setTimeout(flushBlipCoalesceQueue, BLIP_COALESCE_MS);
+    }
+  });
+}
+
+// ─── BLIP results cache by file-content hash. Re-runs with the same input
+// frames return instantly from memory + disk cache, cutting 100% off repeat
+// analyses (common during settings tweaks / re-tries).
+const BLIP_CACHE_DIR = path.join(os.tmpdir(), "vss_blip_cache");
+mkdirSync(BLIP_CACHE_DIR, { recursive: true });
+const blipMemCache = new Map();    // key → {caption, captions}
+
+async function blipCacheKeyForFrames(framePaths) {
+  // Hash size + first 64 KB of the first frame — enough to fingerprint the
+  // source clip without reading whole files. Plus frame count.
+  if (!framePaths.length) return "";
+  try {
+    const stat = await fs.stat(framePaths[0]);
+    const fd = await fs.open(framePaths[0], "r");
+    try {
+      const buf = Buffer.alloc(Math.min(64 * 1024, stat.size));
+      await fd.read(buf, 0, buf.length, 0);
+      const h = createHash("sha256");
+      h.update(buf);
+      h.update(`|size:${stat.size}|n:${framePaths.length}`);
+      return h.digest("hex").slice(0, 24);
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
+async function blipCacheGet(key) {
+  if (!key) return null;
+  if (blipMemCache.has(key)) return blipMemCache.get(key);
+  try {
+    const raw = await fs.readFile(path.join(BLIP_CACHE_DIR, `${key}.json`), "utf8");
+    const data = JSON.parse(raw);
+    blipMemCache.set(key, data);
+    return data;
+  } catch { return null; }
+}
+
+async function blipCacheSet(key, value) {
+  if (!key) return;
+  blipMemCache.set(key, value);
+  try {
+    await fs.writeFile(path.join(BLIP_CACHE_DIR, `${key}.json`), JSON.stringify(value));
+  } catch { /* cache is best-effort */ }
+}
+
+async function describeFramesWithBlip(framePaths = []) {
+  if (!Array.isArray(framePaths) || !framePaths.length) {
+    return { available: false, caption: "", captions: [], error: "BLIP не отримав кадри для аналізу" };
+  }
+  const py = await ensureBlipAvailable();
+  if (!py || !blipScriptPath) {
     return {
       available: false,
       caption: "",
       captions: [],
-      error: !py
-        ? `BLIP не доступний: ${blipInitError || ".venv-blip або залежності не запустились"}`
-        : "BLIP не отримав кадри для аналізу"
+      error: `BLIP не доступний: ${blipInitError || ".venv-blip або залежності не запустились"}`
     };
   }
 
+  // Cache check first — instant return on re-runs with same input frames.
+  const cacheKey = await blipCacheKeyForFrames(framePaths);
+  const cached = await blipCacheGet(cacheKey);
+  if (cached) return { available: true, caption: cached.caption, captions: cached.captions, cached: true };
+
+  // Try the persistent daemon pool first — daemons run in parallel and
+  // coalesce frames from up to 8 concurrent file requests into one big
+  // GPU batch.
+  try {
+    const pool = await ensureBlipDaemon();
+    if (pool && Array.isArray(pool) && pool.length) {
+      const result = await describeFramesCoalesced(framePaths);
+      const captions = Array.isArray(result.captions)
+        ? result.captions.map((x) => String(x || "").trim()).filter(Boolean)
+        : [];
+      const caption = captions.length
+        ? captions.filter((value, index, arr) => arr.indexOf(value) === index).join(". ")
+        : String(result.caption || "").trim();
+      const out = { available: true, caption, captions };
+      if (cacheKey) await blipCacheSet(cacheKey, { caption, captions });
+      return out;
+    }
+  } catch (daemonErr) {
+    process.stderr.write(`[blip] daemon failed, falling back to one-shot: ${daemonErr.message}\n`);
+  }
+
+  // Legacy fallback: one-shot Python invocation. Slower but more isolated.
   try {
     const { stdout } = await runBlipExclusive(() => runCommand(
       py,
@@ -1455,21 +1842,53 @@ async function extractPreviewForClip(videoPath, outputPath, atSeconds = 0.4) {
   ]);
 }
 
-async function downloadYouTubeVideo(youtubeUrl, tempDir) {
+async function downloadYouTubeVideo(youtubeUrl, tempDir, onProgress) {
   await ensureYtDlpAvailable();
   const outTemplate = path.join(tempDir, "source.%(ext)s");
-  const { stdout } = await runCommand(ytDlpBin, [
+  const ffmpegLocation = process.env.FFMPEG_BIN
+    ? path.dirname(process.env.FFMPEG_BIN)
+    : "";
+  const args = [
     "--no-playlist",
     "--restrict-filenames",
     "--merge-output-format", "mp4",
-    "--print", "title",
+    "--no-simulate",
+    "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+    "--extractor-args", "youtube:player_client=web_safari",
+    "--print", "after_video:title",
+    "--newline",                                         // forces yt-dlp to print progress on its own line for parsing
     "-o", outTemplate,
+    ...(ffmpegLocation ? ["--ffmpeg-location", ffmpegLocation] : []),
     String(youtubeUrl || "").trim()
-  ]);
-  const title = String(stdout || "").trim().split(/\r?\n/).filter(Boolean).pop() || "youtube-video";
+  ];
+
+  let titleFromOutput = "";
+  let lastPercent = -1;
+  await runCommandStreamed(ytDlpBin, args, (line) => {
+    // Parse progress: "[download]  45.2% of  189.32MiB at  1.23MiB/s ETA 00:30"
+    const m = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+    if (m) {
+      const pct = Number(m[1]);
+      // Throttle: only emit when % changed by >=1 to avoid event spam.
+      if (Math.floor(pct) !== Math.floor(lastPercent)) {
+        lastPercent = pct;
+        try { onProgress?.(Math.min(99, pct)); } catch {}
+      }
+      return;
+    }
+    // The --print "after_video:title" output is just the title line.
+    // Heuristic: not starting with "[" and not a typical yt-dlp message.
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith("[") && !trimmed.startsWith("WARNING") && !trimmed.startsWith("ERROR")) {
+      titleFromOutput = trimmed;
+    }
+  }, { timeoutMs: 1800000 });
+
+  const title = titleFromOutput || "youtube-video";
   const files = await fs.readdir(tempDir);
   const sourceName = files.find((name) => /^source\./.test(name) && !name.endsWith(".part"));
-  if (!sourceName) throw new Error("yt-dlp не зміг завантажити YouTube-відео");
+  if (!sourceName) throw new Error("yt-dlp не зміг завантажити YouTube-відео (нема файлу у tempDir після завантаження)");
+  try { onProgress?.(100); } catch {}
   return {
     videoPath: path.join(tempDir, sourceName),
     title
@@ -1549,7 +1968,11 @@ function parseMontageSettings(raw) {
     ? String(input.transitionPack)
     : preset;
   const imageAnimationStrength = Math.max(1, Math.min(3, Number(input.imageAnimationStrength) || (preset === "aggressive" ? 3 : preset === "smooth" ? 1 : 2)));
-  const defaultTransition = preset === "aggressive" ? 0.34 : preset === "smooth" ? 0.16 : 0.26;
+  // Transition duration presets aligned to industry norms:
+  //   smooth     = cinematic / personal feel (0.55s)
+  //   dynamic    = documentary / standard (0.32s, sweet spot)
+  //   aggressive = news / thriller / fast cuts (0.18s)
+  const defaultTransition = preset === "aggressive" ? 0.18 : preset === "smooth" ? 0.55 : 0.32;
   const transitionDuration = Math.max(0.08, Math.min(0.8, Number(input.transitionDuration) || defaultTransition));
   const subtitlesEnabled = input.subtitlesEnabled !== false;
   const proMontageMode = ["off", "auto", "intense"].includes(String(input.proMontageMode))
@@ -1569,8 +1992,27 @@ function parseMontageSettings(raw) {
   const proInsertChapterCard = input.proInsertChapterCard !== false;
   const proInsertRedactedDoc = input.proInsertRedactedDoc !== false;
   const proInsertTypewriter = input.proInsertTypewriter !== false;
-  const sfxEnabled = input.sfxEnabled !== false;
-  const sfxVolume = Math.max(0, Math.min(1.5, Number(input.sfxVolume) || 0.85));
+  // Ambient mode: fill segments without specific semantic match with rotating
+  // visual decorations (photo-frame, split-screen, typewriter, etc). Default
+  // ON so a "regular montage" feels rich without needing keyword triggers.
+  const proInsertAmbient = input.proInsertAmbient !== false;
+  // Three new visual layouts users can toggle independently.
+  const proInsertProgressBar = input.proInsertProgressBar !== false;
+  const proInsertQuoteBlock = input.proInsertQuoteBlock !== false;
+  const proInsertAnimatedCounter = input.proInsertAnimatedCounter !== false;
+  // SFX defaults OFF — user feedback: insert sound effects sounded annoying.
+  // User can still opt in via the toggle if they want them.
+  const sfxEnabled = input.sfxEnabled === true;
+  // Default sfxVolume bumped to 1.1 so per-event gain stays loud through the
+  // chain (mood multiplier ~0.7, recipe gain ~0.7, gainBoost ~0.5 → final
+  // would be ~0.27 without this. With 1.1 default → ~0.38, then ×4 pre-amp
+  // brings it back to ~1.5 ≈ 0 dB before ducking).
+  const sfxVolume = Math.max(0, Math.min(1.8, Number(input.sfxVolume) || 1.1));
+  // Procedural background music (genre-matched ambient drone). Default ON
+  // with subtle volume — sits under voice and SFX, ducked aggressively when
+  // voice is loud so it never competes for attention.
+  const musicEnabled = input.musicEnabled !== false;
+  const musicVolume = Math.max(0, Math.min(0.6, Number(input.musicVolume) || 0.28));
   const sfxPack = ["cinematic", "subtle", "minimal"].includes(String(input.sfxPack))
     ? String(input.sfxPack)
     : "cinematic";
@@ -1597,9 +2039,15 @@ function parseMontageSettings(raw) {
     proInsertChapterCard,
     proInsertRedactedDoc,
     proInsertTypewriter,
+    proInsertAmbient,
+    proInsertProgressBar,
+    proInsertQuoteBlock,
+    proInsertAnimatedCounter,
     sfxEnabled,
     sfxVolume,
     sfxPack,
+    musicEnabled,
+    musicVolume,
     language,
     focusLanguage
   };
@@ -1760,6 +2208,149 @@ function defaultSublabel(type, lang) {
   };
   return (map[lang] || map.en)[type] || (map[lang] || map.en).title;
 }
+// City / country → GPS coordinates lookup. Used by location-stamp inserts to
+// replace the generic "ЛОКАЦІЯ" sublabel with actual lat/lon coordinates.
+// Keys are matched case-insensitively against the segment text.
+const CITY_COORDS = {
+  // Ukraine — alternate stems handle Slavic declension (Києві / Києва / Києвом)
+  "kyiv": { lat: 50.4501, lon: 30.5234, label: "Київ, Україна" },
+  "київ": { lat: 50.4501, lon: 30.5234, label: "Київ, Україна" },
+  "києв": { lat: 50.4501, lon: 30.5234, label: "Київ, Україна" },   // Києві, Києва, Києвом
+  "kiev": { lat: 50.4501, lon: 30.5234, label: "Київ, Україна" },   // Russian transliteration
+  "lviv": { lat: 49.8397, lon: 24.0297, label: "Львів, Україна" },
+  "львів": { lat: 49.8397, lon: 24.0297, label: "Львів, Україна" },
+  "львов": { lat: 49.8397, lon: 24.0297, label: "Львів, Україна" }, // Львова, Львові, Львовом
+  "kharkiv": { lat: 49.9935, lon: 36.2304, label: "Харків, Україна" },
+  "харків": { lat: 49.9935, lon: 36.2304, label: "Харків, Україна" },
+  "харков": { lat: 49.9935, lon: 36.2304, label: "Харків, Україна" }, // Харкова, Харкові
+  "odesa": { lat: 46.4825, lon: 30.7233, label: "Одеса, Україна" },
+  "одеса": { lat: 46.4825, lon: 30.7233, label: "Одеса, Україна" },
+  "одес": { lat: 46.4825, lon: 30.7233, label: "Одеса, Україна" },   // Одеси, Одесі, Одесою
+  "dnipro": { lat: 48.4647, lon: 35.0462, label: "Дніпро, Україна" },
+  "дніпро": { lat: 48.4647, lon: 35.0462, label: "Дніпро, Україна" },
+  "дніпр": { lat: 48.4647, lon: 35.0462, label: "Дніпро, Україна" }, // Дніпра, Дніпрі, Дніпром
+  "donetsk": { lat: 48.0159, lon: 37.8028, label: "Донецьк, Україна" },
+  "донецьк": { lat: 48.0159, lon: 37.8028, label: "Донецьк, Україна" },
+  "донецьк": { lat: 48.0159, lon: 37.8028, label: "Донецьк, Україна" },
+  "mariupol": { lat: 47.0971, lon: 37.5434, label: "Маріуполь, Україна" },
+  "маріуполь": { lat: 47.0971, lon: 37.5434, label: "Маріуполь, Україна" },
+  "маріупол": { lat: 47.0971, lon: 37.5434, label: "Маріуполь, Україна" },
+  "україна": { lat: 49.0, lon: 32.0, label: "Україна" },
+  "ukraine": { lat: 49.0, lon: 32.0, label: "Ukraine" },
+  // Russia
+  "moscow": { lat: 55.7558, lon: 37.6173, label: "Москва, Росія" },
+  "москва": { lat: 55.7558, lon: 37.6173, label: "Москва, Росія" },
+  "petersburg": { lat: 59.9311, lon: 30.3609, label: "Санкт-Петербург, Росія" },
+  "петербург": { lat: 59.9311, lon: 30.3609, label: "Санкт-Петербург, Росія" },
+  "russia": { lat: 61.5240, lon: 105.3188, label: "Russia" },
+  "росія": { lat: 61.5240, lon: 105.3188, label: "Росія" },
+  // Europe
+  "berlin": { lat: 52.5200, lon: 13.4050, label: "Berlin, Germany" },
+  "берлін": { lat: 52.5200, lon: 13.4050, label: "Берлін, Німеччина" },
+  "munich": { lat: 48.1351, lon: 11.5820, label: "Munich, Germany" },
+  "мюнхен": { lat: 48.1351, lon: 11.5820, label: "Мюнхен, Німеччина" },
+  "hamburg": { lat: 53.5511, lon: 9.9937, label: "Hamburg, Germany" },
+  "paris": { lat: 48.8566, lon: 2.3522, label: "Paris, France" },
+  "париж": { lat: 48.8566, lon: 2.3522, label: "Париж, Франція" },
+  "london": { lat: 51.5074, lon: -0.1278, label: "London, UK" },
+  "лондон": { lat: 51.5074, lon: -0.1278, label: "Лондон, Великобританія" },
+  "warsaw": { lat: 52.2297, lon: 21.0122, label: "Warsaw, Poland" },
+  "варшава": { lat: 52.2297, lon: 21.0122, label: "Варшава, Польща" },
+  "kraków": { lat: 50.0647, lon: 19.9450, label: "Краків, Польща" },
+  "krakow": { lat: 50.0647, lon: 19.9450, label: "Krakow, Poland" },
+  "rome": { lat: 41.9028, lon: 12.4964, label: "Rome, Italy" },
+  "рим": { lat: 41.9028, lon: 12.4964, label: "Рим, Італія" },
+  "milan": { lat: 45.4642, lon: 9.1900, label: "Milan, Italy" },
+  "madrid": { lat: 40.4168, lon: -3.7038, label: "Madrid, Spain" },
+  "barcelona": { lat: 41.3851, lon: 2.1734, label: "Barcelona, Spain" },
+  "amsterdam": { lat: 52.3676, lon: 4.9041, label: "Amsterdam" },
+  "vienna": { lat: 48.2082, lon: 16.3738, label: "Vienna, Austria" },
+  "відень": { lat: 48.2082, lon: 16.3738, label: "Відень, Австрія" },
+  "prague": { lat: 50.0755, lon: 14.4378, label: "Prague, Czechia" },
+  "прага": { lat: 50.0755, lon: 14.4378, label: "Прага, Чехія" },
+  "budapest": { lat: 47.4979, lon: 19.0402, label: "Budapest, Hungary" },
+  "stockholm": { lat: 59.3293, lon: 18.0686, label: "Stockholm" },
+  "oslo": { lat: 59.9139, lon: 10.7522, label: "Oslo" },
+  "helsinki": { lat: 60.1699, lon: 24.9384, label: "Helsinki" },
+  "brussels": { lat: 50.8503, lon: 4.3517, label: "Brussels" },
+  "lisbon": { lat: 38.7223, lon: -9.1393, label: "Lisbon" },
+  "athens": { lat: 37.9838, lon: 23.7275, label: "Athens" },
+  "istanbul": { lat: 41.0082, lon: 28.9784, label: "Istanbul, Türkiye" },
+  // Americas
+  "new york": { lat: 40.7128, lon: -74.0060, label: "New York, USA" },
+  "нью-йорк": { lat: 40.7128, lon: -74.0060, label: "Нью-Йорк, США" },
+  "washington": { lat: 38.9072, lon: -77.0369, label: "Washington, USA" },
+  "вашингтон": { lat: 38.9072, lon: -77.0369, label: "Вашингтон, США" },
+  "los angeles": { lat: 34.0522, lon: -118.2437, label: "Los Angeles, USA" },
+  "san francisco": { lat: 37.7749, lon: -122.4194, label: "San Francisco" },
+  "chicago": { lat: 41.8781, lon: -87.6298, label: "Chicago" },
+  "miami": { lat: 25.7617, lon: -80.1918, label: "Miami" },
+  "boston": { lat: 42.3601, lon: -71.0589, label: "Boston" },
+  "toronto": { lat: 43.6532, lon: -79.3832, label: "Toronto, Canada" },
+  "mexico city": { lat: 19.4326, lon: -99.1332, label: "Mexico City" },
+  "rio de janeiro": { lat: -22.9068, lon: -43.1729, label: "Rio de Janeiro" },
+  "buenos aires": { lat: -34.6037, lon: -58.3816, label: "Buenos Aires" },
+  // Asia
+  "tokyo": { lat: 35.6762, lon: 139.6503, label: "Tokyo, Japan" },
+  "токіо": { lat: 35.6762, lon: 139.6503, label: "Токіо, Японія" },
+  "beijing": { lat: 39.9042, lon: 116.4074, label: "Beijing, China" },
+  "пекін": { lat: 39.9042, lon: 116.4074, label: "Пекін, Китай" },
+  "shanghai": { lat: 31.2304, lon: 121.4737, label: "Shanghai, China" },
+  "seoul": { lat: 37.5665, lon: 126.9780, label: "Seoul, South Korea" },
+  "hong kong": { lat: 22.3193, lon: 114.1694, label: "Hong Kong" },
+  "singapore": { lat: 1.3521, lon: 103.8198, label: "Singapore" },
+  "bangkok": { lat: 13.7563, lon: 100.5018, label: "Bangkok" },
+  "delhi": { lat: 28.6139, lon: 77.2090, label: "Delhi, India" },
+  "mumbai": { lat: 19.0760, lon: 72.8777, label: "Mumbai, India" },
+  "dubai": { lat: 25.2048, lon: 55.2708, label: "Dubai, UAE" },
+  // Other
+  "tel aviv": { lat: 32.0853, lon: 34.7818, label: "Tel Aviv" },
+  "jerusalem": { lat: 31.7683, lon: 35.2137, label: "Jerusalem" },
+  "cairo": { lat: 30.0444, lon: 31.2357, label: "Cairo, Egypt" },
+  "sydney": { lat: -33.8688, lon: 151.2093, label: "Sydney" },
+  "germany": { lat: 51.1657, lon: 10.4515, label: "Germany" },
+  "france": { lat: 46.2276, lon: 2.2137, label: "France" },
+  "italy": { lat: 41.8719, lon: 12.5674, label: "Italy" },
+  "spain": { lat: 40.4637, lon: -3.7492, label: "Spain" },
+  "poland": { lat: 51.9194, lon: 19.1451, label: "Poland" },
+  "польща": { lat: 51.9194, lon: 19.1451, label: "Польща" }
+};
+
+// Find a city/country from CITY_COORDS in `text`, return matched entry or null.
+// Picks the longest match if multiple found (so "New York" beats "York").
+// Allows up to 3 trailing letters after the key so Slavic case forms match
+// ("Києві" → key "київ" + "і"; "Львова" → "львів" with the root "льв" handled
+// by case-form matching). Trailing >3 letters won't match (avoids "kyivstar").
+function detectCityCoords(text = "") {
+  const lower = String(text || "").toLowerCase();
+  let best = null;
+  for (const key of Object.keys(CITY_COORDS)) {
+    // Strip last vowel from Slavic Cyrillic keys so root matching catches
+    // declension endings ("київ" → root "ки" too greedy; instead chop last
+    // letter for Cyrillic words >=4 chars).
+    const isCyrillic = /[а-яіїєґ]/i.test(key);
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // For Cyrillic: drop the trailing vowel so "київ" matches "києві/києва/києвом"
+    // by allowing 0-3 letters after the truncated stem.
+    const stem = isCyrillic && key.length >= 4 ? escaped.replace(/[аеиіїоуюяь]$/iu, "") : escaped;
+    const re = new RegExp(`(^|[^a-zа-яіїєґ])${stem}[a-zа-яіїєґ]{0,3}([^a-zа-яіїєґ]|$)`, "iu");
+    if (re.test(lower)) {
+      if (!best || key.length > best.key.length) {
+        best = { key, ...CITY_COORDS[key] };
+      }
+    }
+  }
+  return best;
+}
+
+// Format GPS coords as the kind of string you see on a TV news location stamp:
+// "50.45°N, 30.52°E"
+function formatGpsCoords(lat, lon) {
+  const ns = lat >= 0 ? "N" : "S";
+  const ew = lon >= 0 ? "E" : "W";
+  return `${Math.abs(lat).toFixed(2)}°${ns}, ${Math.abs(lon).toFixed(2)}°${ew}`;
+}
+
 // Returns { title, sublabel } for an insert. Pulls real content first; falls
 // back to phrase bank only as a last resort. `usedTitles` tracks already-shown
 // phrases to suppress duplicates within a single render.
@@ -1787,12 +2378,19 @@ function buildSmartInsertContent(rawText = "", type = "title", index = 0, lang =
     if (phrase) { title = phrase; sublabel = defaultSublabel("breaking-news", lang); }
   }
   if (!title && type === "location-stamp") {
-    // Try to extract actual location name from text
-    const locMatch = source.match(/\b(Kyiv|Київ|Москва|Berlin|London|Paris|Warsaw|Варшав\w*|Лондон|Париж|Берлін|Польщ\w*|Україн\w*|Росі\w*|Germany|France|Poland|Ukraine|Russia|America|China|Japan|[A-ZА-ЯҐЇІЄ][a-zа-яґїіє]+ (?:Oblast|Region|Province|District|область|район|провінц))/);
-    if (locMatch) { title = locMatch[0]; sublabel = defaultSublabel("location-stamp", lang); }
-    else {
-      const phrase = extractKeyPhrase(source, 5);
-      if (phrase) { title = phrase; sublabel = defaultSublabel("location-stamp", lang); }
+    // Try to find a known city/country first — gives us real GPS coords for sublabel.
+    const cityHit = detectCityCoords(source);
+    if (cityHit) {
+      title = cityHit.label;
+      sublabel = formatGpsCoords(cityHit.lat, cityHit.lon);
+    }
+    if (!title) {
+      const locMatch = source.match(/\b(Kyiv|Київ|Москва|Berlin|London|Paris|Warsaw|Варшав\w*|Лондон|Париж|Берлін|Польщ\w*|Україн\w*|Росі\w*|Germany|France|Poland|Ukraine|Russia|America|China|Japan|[A-ZА-ЯҐЇІЄ][a-zа-яґїіє]+ (?:Oblast|Region|Province|District|область|район|провінц))/);
+      if (locMatch) { title = locMatch[0]; sublabel = defaultSublabel("location-stamp", lang); }
+      else {
+        const phrase = extractKeyPhrase(source, 5);
+        if (phrase) { title = phrase; sublabel = defaultSublabel("location-stamp", lang); }
+      }
     }
   }
   if (!title && type === "redacted-doc") {
@@ -1809,6 +2407,12 @@ function buildSmartInsertContent(rawText = "", type = "title", index = 0, lang =
   if (!title && type === "chapter-card") {
     const phrase = extractKeyPhrase(source, 5);
     if (phrase) { title = phrase; sublabel = defaultSublabel("chapter-card", lang); }
+  }
+  if (!title && type === "ambient") {
+    // Ambient = generic visual filler. Pull a short snippet so the visual has
+    // SOMETHING readable; keeps it tight so it never competes with narration.
+    const phrase = extractKeyPhrase(source, 4) || compactWords(source, 4);
+    if (phrase) { title = phrase; sublabel = ""; }
   }
   if (!title) {
     // Mood-aware extraction: pick the sentence from the segment that best matches
@@ -2159,18 +2763,25 @@ function pickProfOverlayLayout(type, index = 0, settings = {}, globalMood = null
   const base = {
     title:            ["headline-card", "photo-frame", "title-stack", "tag-pill", "overlay-center"],
     warning:          ["tag-pill", "overlay-pulse", "headline-card"],
-    quote:            ["split-screen", "headline-card", "overlay-center", "overlay-lower"],
+    quote:            ["quote-block", "split-screen", "headline-card", "overlay-center", "overlay-lower"],
     document:         ["tag-pill", "overlay-side", "headline-card"],
-    number:           ["counter-callout", "stat-callout", "headline-card"],
-    timeline:         ["date-stamp", "headline-card", "overlay-lower"],
-    analysis:         ["split-screen", "bar-chart", "headline-card", "overlay-side"],
+    number:           ["animated-counter", "counter-callout", "stat-callout", "progress-bar", "headline-card"],
+    timeline:         ["date-stamp", "animated-counter", "headline-card", "overlay-lower"],
+    analysis:         ["progress-bar", "split-screen", "bar-chart", "headline-card", "overlay-side"],
     place:            ["photo-frame", "corner-flag", "tag-pill", "overlay-lower"],
     person:           ["photo-frame", "headline-card", "overlay-side", "tag-pill"],
     "breaking-news":  ["news-ticker", "overlay-pulse", "headline-card"],
     "location-stamp": ["location-stamp", "corner-flag", "overlay-lower"],
     "chapter-card":   ["chapter-card", "headline-card", "title-stack"],
     "redacted-doc":   ["redacted-doc", "overlay-side", "tag-pill"],
-    "typewriter":     ["typewriter-card", "overlay-center", "title-stack"]
+    "typewriter":     ["typewriter-card", "overlay-center", "title-stack"],
+    // Ambient = generic visual flair pool. Rotates across the cinematic
+    // styles users expect to see as common montage decoration. Pure visuals,
+    // no semantic meaning required from the segment text.
+    // The 3 new layouts (progress-bar, quote-block, animated-counter) are
+    // sprinkled near the front so they actually appear in short videos
+    // instead of waiting until index 10+ in the rotation.
+    ambient:          ["progress-bar", "photo-frame", "quote-block", "split-screen", "animated-counter", "typewriter-card", "tag-pill", "corner-flag", "overlay-pulse", "headline-card", "overlay-side", "date-stamp", "title-stack"]
   };
 
   // Genre-aware overrides: re-order or substitute layouts to match narrative tone.
@@ -2213,8 +2824,32 @@ function pickProfOverlayLayout(type, index = 0, settings = {}, globalMood = null
   const pool = (override || base[type] || ["overlay-lower"]).filter((l) => {
     if (l === "photo-frame" && settings.proInsertPhotoFrame === false) return false;
     if (l === "split-screen" && settings.proInsertSplitScreen === false) return false;
+    if (l === "progress-bar" && settings.proInsertProgressBar === false) return false;
+    if (l === "quote-block" && settings.proInsertQuoteBlock === false) return false;
+    if (l === "animated-counter" && settings.proInsertAnimatedCounter === false) return false;
     return true;
   });
+
+  // For ambient mode, give the 5 "feature" layouts (the ones with explicit
+  // toggles in the UI) guaranteed rotation — every 5th ambient insert cycles
+  // through them. Without this, with a 13-layout pool and `index % 13`,
+  // users with short videos never see split-screen / progress-bar / etc.
+  // because the rotation only hits the first 5-6 indices.
+  if (type === "ambient") {
+    const featurePool = [
+      settings.proInsertSplitScreen !== false ? "split-screen" : null,
+      settings.proInsertProgressBar !== false ? "progress-bar" : null,
+      settings.proInsertQuoteBlock !== false ? "quote-block" : null,
+      settings.proInsertAnimatedCounter !== false ? "animated-counter" : null,
+      settings.proInsertPhotoFrame !== false ? "photo-frame" : null
+    ].filter(Boolean);
+    // Every 3rd ambient insert is a "feature" layout — guarantees visibility
+    // even on short videos with only 6-9 ambient slots.
+    if (featurePool.length && index % 3 === 0) {
+      return featurePool[Math.floor(index / 3) % featurePool.length];
+    }
+  }
+
   return (pool.length ? pool : ["overlay-lower"])[index % (pool.length || 1)];
 }
 
@@ -2281,15 +2916,31 @@ function buildProfInsertTimeline(timeline, montageSettings = {}) {
       }
     }
 
+    // Ambient fill: when nothing specific matched but the segment has room,
+    // sprinkle a generic visual insert from a rotating pool (Photo Frame /
+    // Split Screen / Typewriter / Polaroid / Scanlines / etc). This treats the
+    // pipeline as a regular cinematic montage where most clips get *some*
+    // visual flair, instead of only the ones with strong semantic hooks.
+    if (!insertType && montageSettings.proInsertAmbient !== false) {
+      insertType = "ambient";
+    }
+
     // Maintain rolling context window
     if (item.text) {
       recentTexts.push(item.text);
       if (recentTexts.length > 4) recentTexts.shift();
     }
+    // Ambient inserts are visual filler — looser gating so they actually
+    // appear on most segments. Specific (semantic) inserts keep the original
+    // gating to avoid duplicate identical headlines.
+    const isAmbient = insertType === "ambient";
     const enoughRoom = itemDuration >= 2.4;
-    const farEnoughInTime = Number(item.start || 0) - lastInsertStart >= density.minGapSeconds * modeBoost;
-    const farEnoughInSegments = i - lastInsertSegment >= Math.max(1, Math.floor(density.minGapSegments * modeBoost));
-    const underRate = currentRate < density.maxPerMinute;
+    const minGapSec = isAmbient ? 4 : density.minGapSeconds * modeBoost;
+    const minGapSeg = isAmbient ? 1 : Math.max(1, Math.floor(density.minGapSegments * modeBoost));
+    const maxRate = isAmbient ? density.maxPerMinute * 2.4 : density.maxPerMinute;
+    const farEnoughInTime = Number(item.start || 0) - lastInsertStart >= minGapSec;
+    const farEnoughInSegments = i - lastInsertSegment >= minGapSeg;
+    const underRate = currentRate < maxRate;
 
     if (insertType && enoughRoom && farEnoughInTime && farEnoughInSegments && (underRate || insertType === "chapter-card")) {
       const insertDurationMap = {
@@ -2306,7 +2957,8 @@ function buildProfInsertTimeline(timeline, montageSettings = {}) {
         "location-stamp": 3.0,
         "chapter-card":   4.0,
         "redacted-doc":   4.2,
-        "typewriter":     3.8
+        "typewriter":     3.8,
+        ambient:          2.6
       };
       // Insert appears AFTER the voice has had time to set context — at ~40%
       // into the segment, capped at 1.6s. That way headlines never beat the
@@ -2509,14 +3161,14 @@ const SFX_RECIPES = {
   impact: {
     src: "aevalsrc='exp(-t*9)*sin(2*PI*60*t)+exp(-t*15)*0.6*sin(2*PI*120*t)+exp(-t*22)*0.3*sin(2*PI*240*t)':d=0.55",
     dur: 0.55,
-    chain: "alowpass=f=900",
+    chain: "lowpass=f=900",
     gain: 1.00
   },
   // Sub-thud, no harmonics — for date stamps / corner flags
   thud: {
     src: "aevalsrc='exp(-t*12)*sin(2*PI*45*t)':d=0.40",
     dur: 0.40,
-    chain: "alowpass=f=400",
+    chain: "lowpass=f=400",
     gain: 0.90
   },
   // Pink-noise whoosh — for tag-pill / overlay-pulse / overlay-side
@@ -2544,7 +3196,7 @@ const SFX_RECIPES = {
   drone: {
     src: "aevalsrc='sin(2*PI*55*t)*0.6+sin(2*PI*82.5*t)*0.28':d=2.20",
     dur: 2.20,
-    chain: "afade=t=in:d=0.40,afade=t=out:st=1.70:d=0.50,alowpass=f=1200",
+    chain: "afade=t=in:d=0.40,afade=t=out:st=1.70:d=0.50,lowpass=f=1200",
     gain: 0.75
   },
   // Soft chime / ping — for quote inserts (sine pluck with decay)
@@ -2558,14 +3210,14 @@ const SFX_RECIPES = {
   stinger: {
     src: "aevalsrc='exp(-t*18)*sin(2*PI*180*t)+exp(-t*12)*0.4*sin(2*PI*360*t)+exp(-t*25)*0.2*sin(2*PI*720*t)':d=0.45",
     dur: 0.45,
-    chain: "highpass=f=80,alowpass=f=2000",
+    chain: "highpass=f=80,lowpass=f=2000",
     gain: 1.10
   },
   // Low tension rumble — sub-bass oscillation for sustained dread (investigation/thriller)
   tension: {
     src: "aevalsrc='sin(2*PI*38*t)*0.5+sin(2*PI*57*t)*0.18+sin(2*PI*41*t)*0.14':d=3.00",
     dur: 3.00,
-    chain: "afade=t=in:d=0.60,afade=t=out:st=2.30:d=0.70,alowpass=f=800",
+    chain: "afade=t=in:d=0.60,afade=t=out:st=2.30:d=0.70,lowpass=f=800",
     gain: 0.65
   }
 };
@@ -2617,6 +3269,21 @@ function pickInsertSfx(layout, type, paletteIndex = 0) {
       return [{ type: "whoosh", offset: -0.15 }, { type: "tick", offset: 0.05 }, { type: "thud", offset: 0.12 }];
     case "typewriter-card":
       return [{ type: "tick", offset: 0.0 }, { type: "tick", offset: 0.18 }, { type: "tick", offset: 0.36 }, { type: "tick", offset: 0.54 }];
+    case "progress-bar":
+      // Whoosh as bar starts filling, soft thud at peak (≈ fill end at ~1.2s)
+      return [{ type: "whoosh", offset: -0.15 }, { type: "tick", offset: 0.10 }, { type: "thud", offset: 1.10 }];
+    case "quote-block":
+      // Soft chime — literary, gentle. Single hit, no impact.
+      return [{ type: "chime", offset: 0.0 }];
+    case "animated-counter":
+      // Multiple ticks accelerating as the counter races up
+      return [
+        { type: "riser", offset: -0.40 },
+        { type: "tick", offset: 0.10 },
+        { type: "tick", offset: 0.40 },
+        { type: "tick", offset: 0.70 },
+        { type: "thud", offset: 1.00 }
+      ];
     default:
       return [{ type: "whoosh", offset: -0.10 }, { type: "thud", offset: 0.0 }];
   }
@@ -2801,6 +3468,65 @@ function collectSfxEvents(timeline = [], montageSettings = {}) {
 }
 
 // Build a self-contained SFX audio file by mixing per-event lavfi sources.
+// ─── Procedural background music ────────────────────────────────────────────
+// Generate a mood-appropriate ambient/drone track via FFmpeg's lavfi audio
+// synthesis — no external files, no API, no licensing. Picks a chord and
+// modulation profile based on the detected genre. Mixes 3-5 sine voices with
+// slow LFO and lowpass filtering for a "pad" feel that sits under the voice.
+//
+// Each MUSIC_RECIPES[genre] is a `aevalsrc` expression valid as the source
+// audio for FFmpeg lavfi. Frequencies are picked to form pleasing harmonic
+// intervals matching the emotional tone:
+//   - thriller / investigation: minor third + tritone, dark
+//   - news: pulsed mid-range, urgency without melody
+//   - personal: warm major triad, soft
+//   - documentary: neutral fifth + octave, supportive
+//   - default: light pad
+const MUSIC_RECIPES = {
+  thriller: {
+    expr: "0.30*sin(2*PI*55*t)+0.18*sin(2*PI*65.4*t)+0.10*sin(2*PI*82.4*t)+0.05*sin(2*PI*220*t)*sin(2*PI*0.13*t)",
+    filter: "lowpass=f=900,afade=t=in:d=2.5,afade=t=out:st=__OUT__:d=3.0"
+  },
+  investigation: {
+    expr: "0.28*sin(2*PI*98*t)+0.16*sin(2*PI*146.8*t)+0.10*sin(2*PI*196*t)+0.04*sin(2*PI*880*t)*sin(2*PI*0.11*t)",
+    filter: "lowpass=f=1200,afade=t=in:d=2.0,afade=t=out:st=__OUT__:d=2.5"
+  },
+  news: {
+    expr: "0.22*sin(2*PI*82.4*t)+0.18*sin(2*PI*123.5*t)+0.10*sin(2*PI*1.0*t)*sin(2*PI*246.9*t)",
+    filter: "lowpass=f=2200,afade=t=in:d=1.5,afade=t=out:st=__OUT__:d=2.0"
+  },
+  personal: {
+    expr: "0.26*sin(2*PI*220*t)+0.18*sin(2*PI*277.2*t)+0.14*sin(2*PI*329.6*t)+0.05*sin(2*PI*0.07*t)*sin(2*PI*440*t)",
+    filter: "lowpass=f=1600,afade=t=in:d=3.0,afade=t=out:st=__OUT__:d=3.5"
+  },
+  documentary: {
+    expr: "0.26*sin(2*PI*110*t)+0.16*sin(2*PI*165*t)+0.10*sin(2*PI*220*t)+0.04*sin(2*PI*0.09*t)*sin(2*PI*330*t)",
+    filter: "lowpass=f=1500,afade=t=in:d=2.5,afade=t=out:st=__OUT__:d=3.0"
+  }
+};
+
+async function buildMusicTrack({ totalDuration, outputPath, mood = "documentary", musicVolume = 0.30 }) {
+  const safeDur = Math.max(1.0, Number(totalDuration) || 1);
+  const recipe = MUSIC_RECIPES[mood] || MUSIC_RECIPES.documentary;
+  const fadeOutStart = Math.max(1.0, safeDur - 3.5).toFixed(2);
+  const filterChain = recipe.filter.replace("__OUT__", fadeOutStart);
+  const gain = Math.max(0, Math.min(1.0, Number(musicVolume) || 0.30));
+  // Single lavfi source with the chord expression, then filter chain + volume.
+  await runFfmpeg([
+    "-y",
+    "-f", "lavfi",
+    "-t", safeDur.toFixed(2),
+    "-i", `aevalsrc=${recipe.expr}:s=44100`,
+    "-af", `${filterChain},volume=${gain.toFixed(3)}`,
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-ar", "44100",
+    "-ac", "2",
+    outputPath
+  ]);
+  return true;
+}
+
 async function buildSfxTrack({ events, totalDuration, outputPath, sfxVolume = 0.55 }) {
   if (!Array.isArray(events) || !events.length) return false;
   const safeDur = Math.max(1.0, Number(totalDuration) || 1);
@@ -3530,6 +4256,87 @@ async function buildProfOverlayFilters({ overlayInsert, duration, tempDir }) {
       `drawbox=x=${cursorX}:y=${cardY + 50}:w=4:h=38:color=#1a1a1a:t=fill:enable='${cursorOnC}'`,
       // Sublabel below
       `drawtext=textfile='${escapedSub}'${FONT_BODY}:fontcolor=${accentColor}:fontsize=20${SUB_SHADOW}:x=${cardX + 28}:y=${cardY + 240}+(${slideSub}):alpha='${alpha}':enable='${enable}'`
+    ];
+  }
+
+  // ── progress-bar: animated horizontal fill bar with caption above. Used for
+  //    stats / percentages — bar fills from 0 to full width over 1.2s. ────────
+  if (layout === "progress-bar") {
+    const barX = 220;
+    const barY = 540;
+    const barW = 840;
+    const barH = 18;
+    const fillDur = 1.2;
+    const tFillEnd = (tIn + fillDur).toFixed(2);
+    const tInS = tIn.toFixed(2);
+    // Animated width: linear interpolation from 0 to barW over fillDur, then hold.
+    const animFill = `if(lt(t\\,${tFillEnd})\\,${barW}*(t-${tInS})/${fillDur.toFixed(2)}\\,${barW})`;
+    return [
+      ...buildBgDim(),
+      // Caption above bar
+      `drawtext=textfile='${escapedTitle}'${FONT_HEADLINE}:fontcolor=white:fontsize=34${TEXT_SHADOW}:x=${barX}:y=${barY - 64}+(${slideTitle}):alpha='${alpha}':enable='${enable}'`,
+      // Track (background of bar)
+      `drawbox=x=${barX}:y=${barY}:w=${barW}:h=${barH}:color=white@0.20:t=fill:enable='${enable}'`,
+      // Animated fill
+      `drawbox=x=${barX}:y=${barY}:w=${animFill}:h=${barH}:color=${accentColor}@0.92:t=fill:enable='${enable}'`,
+      // Sublabel below bar
+      `drawtext=textfile='${escapedSub}'${FONT_BODY}:fontcolor=${accentColor}:fontsize=20${SUB_SHADOW}:x=${barX}:y=${barY + 36}+(${slideSub}):alpha='${alpha}':enable='${enable}'`
+    ];
+  }
+
+  // ── quote-block: ornamental quotation-mark frame. Big ❝ ❞ on either side
+  //    with body text in the middle. Most "literary" looking variant. ────────
+  if (layout === "quote-block") {
+    const cardW = 920;
+    const cardH = 280;
+    const cardX = (1280 - cardW) / 2;
+    const cardY = (720 - cardH) / 2;
+    // Write the curly quote marks to their own files so drawtext can render
+    // them reliably regardless of host font support.
+    const openFile = path.join(tempDir, `overlay_quote_open_${randomUUID()}.txt`);
+    const closeFile = path.join(tempDir, `overlay_quote_close_${randomUUID()}.txt`);
+    await fs.writeFile(openFile, "“", "utf8");   // “
+    await fs.writeFile(closeFile, "”", "utf8");  // ”
+    const escOpen = escapeDrawtextPath(openFile);
+    const escClose = escapeDrawtextPath(closeFile);
+    return [
+      ...buildBgDim(),
+      // Card background — soft cream
+      `drawbox=x=${cardX}:y=${cardY}:w=${cardW}:h=${cardH}:color=#f5f0e8@0.92:t=fill:enable='${enable}'`,
+      // Decorative top/bottom accent rule
+      `drawbox=x=${cardX + 60}:y=${cardY + 14}:w=${cardW - 120}:h=2:color=${accentColor}@0.55:t=fill:enable='${enable}'`,
+      `drawbox=x=${cardX + 60}:y=${cardY + cardH - 16}:w=${cardW - 120}:h=2:color=${accentColor}@0.55:t=fill:enable='${enable}'`,
+      // Big opening curly quote (top-left)
+      `drawtext=textfile='${escOpen}'${FONT_HEADLINE}:fontcolor=${accentColor}@0.85:fontsize=140:x=${cardX + 30}:y=${cardY - 18}:alpha='${alpha}':enable='${enable}'`,
+      // Big closing curly quote (bottom-right)
+      `drawtext=textfile='${escClose}'${FONT_HEADLINE}:fontcolor=${accentColor}@0.85:fontsize=140:x=${cardX + cardW - 130}:y=${cardY + cardH - 150}:alpha='${alpha}':enable='${enable}'`,
+      // Body — italic-feel via FONT_HEADLINE with smaller size
+      `drawtext=textfile='${escapedTitle}'${FONT_HEADLINE}:fontcolor=#1a1a1a:fontsize=32:x=${cardX + 100}:y=${cardY + 90}+(${slideTitle}):alpha='${alpha}':enable='${enable}'`,
+      // Source/attribution
+      `drawtext=textfile='${escapedSub}'${FONT_BODY}:fontcolor=${accentColor}:fontsize=20${SUB_SHADOW}:x=${cardX + 100}:y=${cardY + cardH - 60}+(${slideSub}):alpha='${alpha}':enable='${enable}'`
+    ];
+  }
+
+  // ── animated-counter: number that ticks up from 0 to the target value over
+  //    1.0s. Uses FFmpeg's %{eif} expr for in-place numeric animation. ────────
+  if (layout === "animated-counter") {
+    // Parse a target number from the title (fallback to length-based hash for
+    // generic ambient inserts so the counter still has *something* to count to).
+    const numMatch = String(titleLine).match(/(\d+(?:[.,]\d+)?)/);
+    const target = numMatch ? Math.min(99999, Math.round(Number(numMatch[1].replace(",", "."))) || 1) : Math.max(10, titleLine.length * 7);
+    const tickDur = 1.0;
+    const tInS = tIn.toFixed(2);
+    const tTickEnd = (tIn + tickDur).toFixed(2);
+    // Counter expression: linearly interpolates 0→target over tickDur, then holds.
+    const counterExpr = `if(lt(t\\,${tTickEnd})\\,${target}*(t-${tInS})/${tickDur.toFixed(2)}\\,${target})`;
+    return [
+      ...buildBgDim(),
+      // Big counter number — center of frame
+      `drawtext=text='%{eif\\:${counterExpr}\\:d\\:0}'${FONT_HEADLINE}:fontcolor=${accentColor}:fontsize=140${TEXT_SHADOW}:x=(w-text_w)/2:y=240:alpha='${alpha}':enable='${enable}'`,
+      // Sublabel below
+      `drawtext=textfile='${escapedSub}'${FONT_BODY}:fontcolor=white:fontsize=26${SUB_SHADOW}:x=(w-text_w)/2:y=420+(${slideSub}):alpha='${alpha}':enable='${enable}'`,
+      // Title above (smaller)
+      `drawtext=textfile='${escapedTitle}'${FONT_BODY}:fontcolor=white@0.75:fontsize=22${SUB_SHADOW}:x=(w-text_w)/2:y=200+(${slideTitle}):alpha='${alpha}':enable='${enable}'`
     ];
   }
 
@@ -4435,62 +5242,168 @@ async function buildImagePartFromBuffer(buffer, mimeType = "image/jpeg") {
   };
 }
 
+// ─── Whisper preprocessing ──────────────────────────────────────────────────
+// Whisper API has a 25 MB upload cap. To support large videos / long recordings,
+// we always re-encode to mono 16 kHz 32 kbps MP3 (Whisper's recommended format)
+// and split into chunks if still too large. Output chunks are <24 MB each,
+// preserving timestamps via per-chunk offsetSec.
+const WHISPER_MAX_BYTES = 24 * 1024 * 1024;          // 24 MB safety margin under the 25 MB API cap
+const WHISPER_TARGET_BITRATE_KBPS = 32;              // mono 16 kHz 32 kbps ≈ 4 MB / 17 min
+const WHISPER_CHUNK_MAX_SECONDS = 25 * 60;           // 25 min cap per chunk
+
+async function compressForWhisper(inputPath, tempDir) {
+  const compressedPath = path.join(tempDir, "whisper_audio.mp3");
+  await runFfmpeg([
+    "-y", "-i", inputPath,
+    "-vn",                                // drop video stream
+    "-ac", "1",                           // mono
+    "-ar", "16000",                       // 16 kHz (Whisper sweet spot)
+    "-codec:a", "libmp3lame",
+    "-b:a", `${WHISPER_TARGET_BITRATE_KBPS}k`,
+    compressedPath
+  ]);
+  return compressedPath;
+}
+
+async function splitAudioForWhisper(audioPath, tempDir) {
+  const duration = await probeMediaDuration(audioPath).catch(() => 0);
+  const stat = await fs.stat(audioPath);
+  if (!duration || stat.size <= WHISPER_MAX_BYTES) {
+    return [{ path: audioPath, offsetSec: 0 }];
+  }
+  // Estimate chunk duration so each piece comes in under WHISPER_MAX_BYTES.
+  const safeChunkDur = Math.min(
+    WHISPER_CHUNK_MAX_SECONDS,
+    Math.floor(duration * (WHISPER_MAX_BYTES / stat.size) * 0.9)
+  );
+  if (safeChunkDur < 30) {
+    throw new Error(`Не вдалось підібрати розмір чанка для розбивки (тривалість ${duration}s, файл ${stat.size} B)`);
+  }
+  const chunks = [];
+  let offset = 0;
+  let idx = 0;
+  while (offset < duration) {
+    const chunkPath = path.join(tempDir, `whisper_chunk_${idx}.mp3`);
+    await runFfmpeg([
+      "-y", "-ss", String(offset), "-i", audioPath,
+      "-t", String(safeChunkDur),
+      "-c:a", "copy",
+      chunkPath
+    ]);
+    chunks.push({ path: chunkPath, offsetSec: offset });
+    offset += safeChunkDur;
+    idx += 1;
+  }
+  return chunks;
+}
+
+async function transcribeChunk({ chunkPath, offsetSec, openaiApiKey, language }) {
+  const buffer = await fs.readFile(chunkPath);
+  const form = new FormData();
+  const blob = new Blob([buffer], { type: "audio/mpeg" });
+  form.append("file", blob, "chunk.mp3");
+  form.append("model", "whisper-1");
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "word");
+  form.append("timestamp_granularities[]", "segment");
+  if (language) form.append("language", language);
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${openaiApiKey}` },
+    body: form
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error?.message || `HTTP ${response.status}`);
+  }
+
+  // Shift timestamps so chunks line up into one continuous timeline.
+  const offset = Number(offsetSec) || 0;
+  const segments = (data.segments || []).map((s) => ({
+    ...s,
+    start: Number(s.start || 0) + offset,
+    end: Number(s.end || 0) + offset
+  }));
+  const words = (data.words || []).map((w) => ({
+    ...w,
+    start: Number(w.start || 0) + offset,
+    end: Number(w.end || 0) + offset
+  }));
+  return { text: data.text || "", segments, words };
+}
+
 app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
+  // Big files = compress + split + sequential Whisper calls. Disable timeout.
+  req.setTimeout(0);
+  res.setTimeout(0);
+
+  const tempDir = path.join(os.tmpdir(), `vss_transcribe_${randomUUID()}`);
   try {
     if (!req.file) {
       return res.status(400).json({ error: "Аудіофайл не передано" });
     }
-    if ((req.file.size || 0) > OPENAI_AUDIO_MAX_BYTES) {
-      const mb = ((req.file.size || 0) / (1024 * 1024)).toFixed(1);
-      return res.status(400).json({ error: `Аудіо завелике для OpenAI (${mb} MB). Ліміт 25 MB. Стисни або розріж файл.` });
-    }
-
     const openaiApiKey = req.body.openaiApiKey || process.env.OPENAI_API_KEY;
     if (!openaiApiKey) {
       return res.status(400).json({ error: "Потрібен OpenAI API key" });
     }
 
-    const form = new FormData();
-    const blob = new Blob([req.file.buffer], { type: req.file.mimetype || "audio/mpeg" });
-    form.append("file", blob, req.file.originalname || "voice.mp3");
-    form.append("model", "whisper-1");
-    form.append("response_format", "verbose_json");
-    // Word-level timestamps power the VAD-based splitter (real silence gaps +
-    // sentence-ending punctuation). No extra cost — same Whisper request.
-    form.append("timestamp_granularities[]", "word");
-    form.append("timestamp_granularities[]", "segment");
-    if (req.body.language) form.append("language", req.body.language);
+    await fs.mkdir(tempDir, { recursive: true });
 
-    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${openaiApiKey}`
-      },
-      body: form
-    });
+    // Save upload to disk for FFmpeg.
+    const inputExt = path.extname(req.file.originalname || "").toLowerCase() || ".mp4";
+    const inputPath = path.join(tempDir, `input${inputExt}`);
+    await fs.writeFile(inputPath, req.file.buffer);
 
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const rawMsg = String(data?.error?.message || "");
-      if (/maximum content size limit|413/i.test(rawMsg)) {
-        return res.status(400).json({ error: "OpenAI відхилив аудіо через ліміт 25 MB. Стисни або розріж файл." });
-      }
-      return res.status(response.status).json({ error: rawMsg || "Помилка транскрипції" });
+    // Step 1: compress to Whisper-optimal mono MP3. Even huge files usually
+    // fit in a single Whisper call after this (≈ 4 MB per 17 minutes).
+    let audioPath;
+    let needSplit = false;
+    if ((req.file.size || 0) > WHISPER_MAX_BYTES || !/\.(mp3|m4a|aac|ogg|webm|flac|wav)$/i.test(inputExt)) {
+      await ensureFfmpegAvailable();
+      audioPath = await compressForWhisper(inputPath, tempDir);
+      const stat = await fs.stat(audioPath);
+      needSplit = stat.size > WHISPER_MAX_BYTES;
+    } else {
+      // Already small + audio format — send as-is, no re-encode.
+      audioPath = inputPath;
     }
 
-    const text = data.text || "";
+    // Step 2: split into chunks if needed.
+    const chunks = needSplit
+      ? await splitAudioForWhisper(audioPath, tempDir)
+      : [{ path: audioPath, offsetSec: 0 }];
+
+    // Step 3: transcribe each chunk sequentially (Whisper rate-limits 50 rpm,
+    // but sequential keeps memory low for very long videos).
+    const merged = { text: "", segments: [], words: [] };
+    for (const chunk of chunks) {
+      const result = await transcribeChunk({
+        chunkPath: chunk.path,
+        offsetSec: chunk.offsetSec,
+        openaiApiKey,
+        language: req.body.language
+      });
+      merged.text = (merged.text ? `${merged.text} ` : "") + result.text;
+      merged.segments.push(...result.segments);
+      merged.words.push(...result.words);
+    }
+
     const splitMode = req.body.splitMode === "fixed" ? "fixed" : "context";
     const fixedSeconds = Number(req.body.fixedSeconds || 4);
-    // "context" mode silently upgrades to word-level VAD when Whisper returned
-    // word timestamps — same UI option, sharper boundaries. Falls back to the
-    // segment-level splitter automatically when words[] is missing.
     const segments = splitMode === "fixed"
-      ? buildFixedSegments(data.segments, text, fixedSeconds)
-      : buildVadSegments(data.words, data.segments, text);
+      ? buildFixedSegments(merged.segments, merged.text, fixedSeconds)
+      : buildVadSegments(merged.words, merged.segments, merged.text);
 
-    return res.json({ text, segments });
+    return res.json({
+      text: merged.text.trim(),
+      segments,
+      meta: { chunkCount: chunks.length, originalSizeMb: ((req.file.size || 0) / 1048576).toFixed(1) }
+    });
   } catch (error) {
-    return res.status(500).json({ error: error.message || "Невідома помилка" });
+    return res.status(500).json({ error: error.message || "Невідома помилка транскрипції" });
+  } finally {
+    fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
@@ -4521,10 +5434,21 @@ app.post("/api/local/analyze", upload.array("localAssets", 1000), async (req, re
   gcOldAnalyzeDirs().catch(() => {});
   const tempDir = path.join(LOCAL_ANALYZE_KEEP_ROOT, randomUUID());
 
+  // Emit NDJSON progress lines so the UI can show "Проаналізовано 5/12" live.
+  // Final line is the legacy { assets: [...] } payload — same shape as before
+  // so older clients still parse it (they skip earlier "progress" lines).
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  const send = (event) => { try { res.write(JSON.stringify(event) + "\n"); } catch {} };
+
   try {
     const files = req.files || [];
     if (!files.length) {
-      return res.status(400).json({ error: "Локальні файли не передано" });
+      send({ error: "Локальні файли не передано" });
+      res.end();
+      return;
     }
 
     const locale = String(req.body.language || "uk");
@@ -4534,6 +5458,9 @@ app.post("/api/local/analyze", upload.array("localAssets", 1000), async (req, re
       ? (userOpenaiKey || process.env.OPENAI_API_KEY || "")
       : "";
     await fs.mkdir(tempDir, { recursive: true });
+
+    send({ type: "start", total: files.length });
+    let analyzedCount = 0;
 
     const videoExt = new Set([".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"]);
     const imageExt = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]);
@@ -4642,7 +5569,7 @@ app.post("/api/local/analyze", upload.array("localAssets", 1000), async (req, re
           scene = scene || simpleTitle;
         }
 
-        return {
+        const result = {
           fileIndex: i,
           kind,
           filename: file.originalname,
@@ -4656,6 +5583,16 @@ app.post("/api/local/analyze", upload.array("localAssets", 1000), async (req, re
           framePaths: framePathsForEmbed,
           analyzed: Boolean(summary || scene || objects.length || ocrText)
         };
+        // Emit progress line per file as it completes — frontend updates
+        // "Проаналізовано X/Y файлів" counter live.
+        analyzedCount += 1;
+        send({
+          type: "progress",
+          done: analyzedCount,
+          total: files.length,
+          filename: String(file.originalname || "").slice(0, 80)
+        });
+        return result;
       },
       ANALYZE_CONCURRENCY
     );
@@ -4664,9 +5601,11 @@ app.post("/api/local/analyze", upload.array("localAssets", 1000), async (req, re
       .filter(({ result, error }) => result && !error)
       .map(({ result }) => result);
 
-    return res.json({ assets: results });
+    send({ type: "done", assets: results });
+    res.end();
   } catch (error) {
-    return res.status(500).json({ error: error.message || "Помилка аналізу медіа" });
+    send({ type: "error", error: error.message || "Помилка аналізу медіа" });
+    try { res.end(); } catch {}
   }
   // NOTE: tempDir is kept on disk so /api/local/embed-match can reuse the
   // extracted frames. gcOldAnalyzeDirs() prunes dirs older than 30 minutes
@@ -5406,7 +6345,24 @@ async function buildMontageInternal({ audio, timelineRaw, localFiles, montageSet
     const audioDuration = await probeMediaDuration(audioPath).catch(() => 0);
 
     const montageSettings = parseMontageSettings(montageSettingsRaw);
-    const transitionDuration = montageSettings.transitionDuration;
+    // Mood-aware transition duration: when the user hasn't overridden the
+    // default, retune by detected genre. Thriller/news → snappier cuts;
+    // personal/documentary → softer dissolves; investigation → standard.
+    // Only kicks in when transitionDuration matches the preset default
+    // (i.e. user kept the slider at default).
+    const presetDefault = montageSettings.preset === "aggressive" ? 0.18
+      : montageSettings.preset === "smooth" ? 0.55 : 0.32;
+    let transitionDuration = montageSettings.transitionDuration;
+    if (Math.abs(transitionDuration - presetDefault) < 0.005) {
+      const moodSnapshot = analyzeTranscriptMood(timeline);
+      const moodMultiplier =
+        moodSnapshot.genre === "thriller"      ? 0.65 :    // sharper, faster
+        moodSnapshot.genre === "news"          ? 0.60 :    // urgent
+        moodSnapshot.genre === "personal"      ? 1.45 :    // softer, longer
+        moodSnapshot.genre === "investigation" ? 0.85 :    // slightly tightened
+                                                  1.0;     // documentary / default
+      transitionDuration = Math.max(0.10, Math.min(0.75, presetDefault * moodMultiplier));
+    }
     const timelineWithDurationFix = timeline.map((x) => ({ ...x }));
     const visualDuration = timelineWithDurationFix.reduce((sum, x) => sum + Number(x.duration || 0), 0);
     const overlapTotal = Math.max(0, timelineWithDurationFix.length - 1) * transitionDuration;
@@ -5603,7 +6559,7 @@ async function buildMontageInternal({ audio, timelineRaw, localFiles, montageSet
             events: sfxEvents,
             totalDuration: sfxDur,
             outputPath: sfxTrackPath,
-            sfxVolume: Number(montageSettings.sfxVolume || 0.85) * moodGainMultiplier
+            sfxVolume: Number(montageSettings.sfxVolume || 1.1) * moodGainMultiplier
           });
         }
       } catch (sfxError) {
@@ -5612,31 +6568,73 @@ async function buildMontageInternal({ audio, timelineRaw, localFiles, montageSet
       }
     }
 
+    // ─── Background music (optional, procedural) ──────────────────────────
+    const musicTrackPath = path.join(tempDir, "music_track.aac");
+    let hasMusic = false;
+    if (montageSettings.musicEnabled !== false) {
+      try {
+        const moodAnalysis = analyzeTranscriptMood(renderTimeline);
+        const musicVol = Math.max(0, Math.min(0.6, Number(montageSettings.musicVolume || 0.28)));
+        if (musicVol > 0.01) {
+          await buildMusicTrack({
+            totalDuration: audioDuration > 0 ? audioDuration : visualDuration,
+            outputPath: musicTrackPath,
+            mood: moodAnalysis.genre || "documentary",
+            musicVolume: musicVol
+          });
+          hasMusic = true;
+        }
+      } catch (musicError) {
+        // Music is optional polish — never fail the whole render because of it.
+        hasMusic = false;
+      }
+    }
+
     const ffmpegArgs = [
       "-y",
       "-i", timelineVideoPath,
       "-i", audioPath,
-      ...(hasSfx ? ["-i", sfxTrackPath] : [])
+      ...(hasSfx ? ["-i", sfxTrackPath] : []),
+      ...(hasMusic ? ["-i", musicTrackPath] : [])
     ];
 
-    // Audio production chain — applied to the final mix:
-    //   1. Pre-amp SFX so it's audibly present during silences.
-    //   2. Sidechain-compress SFX using voice as trigger → SFX ducks ~9dB
-    //      when narration is loud, full volume during pauses. Threshold is
-    //      tuned to "loud speech" (-12dB), not "any signal" — prevents
-    //      constant ducking that masks SFX entirely.
-    //   3. Mix voice + ducked-SFX.
-    //   4. EBU R128 / ITU-R BS.1770 loudness normalization to I=-16 LUFS,
-    //      true peak -1.5dB — YouTube/podcast standard.
-    const SFX_PREAMP = 2.2;  // bring SFX up; ducking will tame it during voice
-    const DUCK_PARAMS = "threshold=0.18:ratio=4:attack=20:release=400:makeup=1:level_sc=1";
+    // Audio production chain. Inputs by index:
+    //   0 = video, 1 = voice, 2 = SFX (if hasSfx), 2|3 = music (depending on sfx)
+    // Voice gets sidechain-split into N copies (one per ducker + one for mix).
+    // SFX ducks moderately (3:1) so it shines during silence. Music ducks
+    // harder (8:1) so voice always cuts through the bed track.
+    const SFX_PREAMP = 4.0;
+    const MUSIC_PREAMP = 1.6;
+    const DUCK_SFX = "threshold=0.25:ratio=3:attack=20:release=450:makeup=1:level_sc=1";
+    const DUCK_MUSIC = "threshold=0.12:ratio=8:attack=15:release=700:makeup=1:level_sc=1.2";
     const LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11";
-    const audioChainWithSfx =
-      `[2:a]volume=${SFX_PREAMP}[sfxraw];` +
-      `[1:a]asplit=2[v1][v2];` +
-      `[sfxraw][v1]sidechaincompress=${DUCK_PARAMS}[sfxd];` +
-      `[v2][sfxd]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[premix];` +
-      `[premix]${LOUDNORM}[aout]`;
+
+    // Build the audio filter graph based on which extras we have.
+    function buildAudioGraph() {
+      if (!hasSfx && !hasMusic) return null;
+      const sfxIdx = hasSfx ? 2 : -1;
+      const musicIdx = hasMusic ? (hasSfx ? 3 : 2) : -1;
+      const splitCount = 1 + (hasSfx ? 1 : 0) + (hasMusic ? 1 : 0);
+      const parts = [];
+      parts.push(`[1:a]asplit=${splitCount}` + Array.from({ length: splitCount }, (_, i) => `[v${i}]`).join(""));
+      const mixInputs = ["[v0]"];
+      let triggerIdx = 1;
+      if (hasSfx) {
+        parts.push(`[${sfxIdx}:a]volume=${SFX_PREAMP}[sfxraw]`);
+        parts.push(`[sfxraw][v${triggerIdx}]sidechaincompress=${DUCK_SFX}[sfxd]`);
+        mixInputs.push("[sfxd]");
+        triggerIdx += 1;
+      }
+      if (hasMusic) {
+        parts.push(`[${musicIdx}:a]volume=${MUSIC_PREAMP}[musraw]`);
+        parts.push(`[musraw][v${triggerIdx}]sidechaincompress=${DUCK_MUSIC}[musd]`);
+        mixInputs.push("[musd]");
+      }
+      parts.push(`${mixInputs.join("")}amix=inputs=${mixInputs.length}:duration=first:dropout_transition=0:normalize=0[premix]`);
+      parts.push(`[premix]${LOUDNORM}[aout]`);
+      return parts.join(";");
+    }
+    const audioGraph = buildAudioGraph();
 
     // Build video+audio filter args. -vf and -filter_complex conflict when both
     // are needed: -map 0:v:0 bypasses a -vf subtitles filter. Fix: fold subtitles
@@ -5647,15 +6645,13 @@ async function buildMontageInternal({ audio, timelineRaw, localFiles, montageSet
         .replace(/:/g, "\\:")
         .replace(/'/g, "\\'");
       const subsFilter = `subtitles='${escapedSrtPath}':force_style='FontName=Avenir Next Condensed,FontSize=26,Bold=1,Alignment=2,MarginV=42,PrimaryColour=&H00F8FAFC,OutlineColour=&HC0000000,BackColour=&H88000000,BorderStyle=3,Outline=2,Shadow=1'`;
-      if (hasSfx) {
-        // Both subtitles and SFX: fold everything into one filter_complex.
+      if (audioGraph) {
         ffmpegArgs.push(
-          "-filter_complex", `[0:v]${subsFilter}[vout];${audioChainWithSfx}`,
+          "-filter_complex", `[0:v]${subsFilter}[vout];${audioGraph}`,
           "-map", "[vout]",
           "-map", "[aout]"
         );
       } else {
-        // Subtitles only: -vf for video, -af loudnorm for stable loudness.
         ffmpegArgs.push(
           "-vf", subsFilter,
           "-map", "0:v:0",
@@ -5663,15 +6659,13 @@ async function buildMontageInternal({ audio, timelineRaw, localFiles, montageSet
           "-af", LOUDNORM
         );
       }
-    } else if (hasSfx) {
-      // SFX only, no subtitles: filter_complex for audio (duck + loudnorm), raw video.
+    } else if (audioGraph) {
       ffmpegArgs.push(
-        "-filter_complex", audioChainWithSfx,
+        "-filter_complex", audioGraph,
         "-map", "0:v:0",
         "-map", "[aout]"
       );
     } else {
-      // Neither subtitles nor SFX: still loudnorm voice for consistent output level.
       ffmpegArgs.push(
         "-map", "0:v:0",
         "-map", "1:a:0",
@@ -5827,23 +6821,36 @@ app.post(
 app.post(
   "/api/cutter/run",
   cutterUpload.fields([
-    { name: "videoFile", maxCount: 1 }
+    { name: "videoFile", maxCount: 50 }   // accept up to 50 local videos in one batch
   ]),
   async (req, res) => {
-    // BLIP can take many minutes per call on slow machines / Python 3.14
-    // without Metal. Make sure Node never times out the cutter request itself.
     req.setTimeout(0);
     res.setTimeout(0);
+
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    const send = (event) => { try { res.write(JSON.stringify(event) + "\n"); } catch {} };
+
     const tempDir = path.join(os.tmpdir(), `vss_cutter_${randomUUID()}`);
     const uploadedPaths = [];
     try {
       await ensureFfmpegAvailable();
       await fs.mkdir(tempDir, { recursive: true });
 
-      const youtubeUrl = String(req.body.youtubeUrl || "").trim();
-      const uploaded = req.files?.videoFile?.[0] || null;
-      if (!youtubeUrl && !uploaded) {
-        return res.status(400).json({ error: "Додай YouTube-посилання або локальний відеофайл" });
+      // ── Parse multi-source input ──────────────────────────────────────────
+      // Accept URLs separated by newline, space, tab, comma, semicolon — any
+      // common paste pattern works. Match http(s) prefix so accidental words
+      // in the textarea don't get treated as URLs.
+      const rawYtBlock = String(req.body.youtubeUrls || req.body.youtubeUrl || "");
+      const youtubeUrls = (rawYtBlock.match(/https?:\/\/[^\s,;]+/gi) || [])
+        .map((s) => s.trim()).filter(Boolean);
+      const uploadedFiles = req.files?.videoFile || [];
+      if (!youtubeUrls.length && !uploadedFiles.length) {
+        send({ stage: "error", error: "Додай хоча б одне YouTube-посилання або локальний відеофайл" });
+        res.end();
+        return;
       }
 
       const segmentSeconds = Math.max(2, Math.min(120, Number(req.body.segmentSeconds || 8) || 8));
@@ -5852,47 +6859,18 @@ app.post(
       const captionMode = String(req.body.captionMode || "blip").trim().toLowerCase();
       const cutterConcurrency = resolveCutterConcurrency(captionMode, req.body.cutterThreads);
 
-      const useLocalFile = Boolean(uploaded);
-      let sourceVideoPath = "";
-      let sourceTitle = projectLabelRaw || "video";
-
-      if (useLocalFile) {
-        if (uploaded.path) {
-          sourceVideoPath = uploaded.path;
-          uploadedPaths.push(uploaded.path);
-        } else {
-          const ext = safeExtFromName(uploaded.originalname, ".mp4");
-          sourceVideoPath = path.join(tempDir, `source${ext}`);
-          await fs.writeFile(sourceVideoPath, uploaded.buffer);
-        }
-        if (!projectLabelRaw) {
-          sourceTitle = String(uploaded.originalname || "video").replace(/\.[a-z0-9]+$/i, "");
-        }
-      } else {
-        const downloaded = await downloadYouTubeVideo(youtubeUrl, tempDir);
-        sourceVideoPath = downloaded.videoPath;
-        if (!projectLabelRaw) sourceTitle = downloaded.title;
+      // Build the source queue: locals first (already on disk), then YouTube
+      // URLs (download sequentially to avoid network/CPU contention).
+      const sources = [];
+      for (const file of uploadedFiles) {
+        sources.push({ type: "local", file });
+      }
+      for (const url of youtubeUrls) {
+        sources.push({ type: "youtube", url });
       }
 
-      const duration = await probeMediaDuration(sourceVideoPath).catch(() => 0);
-      if (!duration || duration < 0.5) {
-        return res.status(400).json({ error: "Не вдалося визначити тривалість відео для нарізки" });
-      }
-
-      const isGenericSourceTitle = isGenericSourceName(sourceTitle);
-      const sourceContextDir = path.join(tempDir, "source_context");
-      await fs.mkdir(sourceContextDir, { recursive: true });
-      const sourceFramePaths = await extractFramePathsDeep(sourceVideoPath, sourceContextDir, 3).catch(() => []);
-      const sourceBlip = await describeFramesWithBlip(sourceFramePaths);
-      const sourceOcr = await extractOcrFromVideoFrames(sourceVideoPath, sourceContextDir).catch(() => "");
-      const sourceAnalysisContext = [
-        isGenericSourceTitle ? "" : sourceTitle,
-        sourceBlip.caption,
-        cleanOcrForTitle(sourceOcr)
-      ].filter(Boolean).join(". ");
-      const titleContextBase = sourceAnalysisContext || (isGenericSourceTitle ? "архівний фрагмент відео" : sourceTitle);
-
-      const projectSlug = slugifyText(projectLabelRaw || (isGenericSourceTitle ? "cuts" : sourceTitle) || "cuts", "cuts");
+      // Single shared output dir for all sources in this batch.
+      const projectSlug = slugifyText(projectLabelRaw || "cuts", "cuts");
       const folderName = `cuts_${projectSlug}_${Date.now()}`;
       const projectDir = path.join(OUTPUT_DIR, folderName);
       const clipsDir = path.join(projectDir, "clips");
@@ -5900,121 +6878,201 @@ app.post(
       await fs.mkdir(clipsDir, { recursive: true });
       await fs.mkdir(previewsDir, { recursive: true });
 
-      const segmentsToCut = [];
-      for (let start = 0; start < duration - 0.05; start += segmentSeconds) {
-        const end = Math.min(duration, start + segmentSeconds);
-        segmentsToCut.push({
-          index: segmentsToCut.length,
-          start,
-          end,
-          clipDuration: Math.max(0.5, end - start)
-        });
-      }
-
-      const processedSegments = await mapWithConcurrency(segmentsToCut, cutterConcurrency, async (segment) => {
-        const { index, start, end, clipDuration } = segment;
-        const segmentTempDir = path.join(tempDir, `segment_${String(index + 1).padStart(5, "0")}`);
-        await fs.mkdir(segmentTempDir, { recursive: true });
-        const tempClipPath = path.join(segmentTempDir, `clip_${String(index + 1).padStart(4, "0")}.mp4`);
-        await runFfmpeg([
-          "-y",
-          "-ss", String(start),
-          "-i", sourceVideoPath,
-          "-t", String(clipDuration),
-          "-vf", "fps=30,format=yuv420p",
-          ...videoCodecArgs(),
-          "-c:a", "aac",
-          "-b:a", "128k",
-          "-movflags", "+faststart",
-          tempClipPath
-        ]);
-
-        const ocrText = await extractOcrFromVideoFrames(tempClipPath, segmentTempDir).catch(() => "");
-        const framePaths = await extractFramePathsDeep(tempClipPath, segmentTempDir, 3).catch(() => []);
-        // Auto names must be based on the visible clip, not on OCR noise or
-        // the source filename. OCR is only a fallback when BLIP cannot caption.
-        const blip = await describeFramesWithBlip(framePaths);
-        const titleMeta = buildCutTitleAnalysis({
-          baseTitle: titleContextBase,
-          ocrText,
-          blipCaption: blip.caption,
-          blipCaptions: blip.captions,
-          blipError: blip.error,
-          start,
-          end,
-          namingMode
-        });
-        const clipTitle = titleMeta.title;
-        const timeSlug = `${formatCutTimeCompact(start)}_to_${formatCutTimeCompact(end)}`;
-        const baseStem = String(titleMeta.fileSlug || "").trim() || slugifyText(clipTitle, `fragment-${timeSlug}`);
-
-        return {
-          index,
-          start,
-          end,
-          clipDuration,
-          tempClipPath,
-          clipTitle,
-          timeSlug,
-          baseStem,
-          titleMeta,
-          blip,
-          ocrText
-        };
-      });
-
-      const clips = [];
+      const allClips = [];
       const usedFileStems = new Set();
-      for (const processed of processedSegments.sort((a, b) => a.index - b.index)) {
-        const { index, start, end, clipDuration, tempClipPath, clipTitle, timeSlug, baseStem, titleMeta, blip, ocrText } = processed;
-        let fileStem = baseStem;
-        if (!fileStem) fileStem = `fragment-${timeSlug}`;
-        let suffix = 2;
-        while (usedFileStems.has(fileStem)) {
-          fileStem = `${baseStem || "fragment"}-${suffix}`;
-          suffix += 1;
+      const sourcesMeta = [];
+      let globalClipCounter = 0;
+
+      // ── Process each source sequentially ──────────────────────────────────
+      for (let srcIdx = 0; srcIdx < sources.length; srcIdx += 1) {
+        const src = sources[srcIdx];
+        const sourceLabel = `Джерело ${srcIdx + 1}/${sources.length}`;
+        const srcPrefix = `src${String(srcIdx + 1).padStart(2, "0")}`;
+
+        let sourceVideoPath = "";
+        let sourceTitle = projectLabelRaw || `video_${srcIdx + 1}`;
+
+        if (src.type === "local") {
+          const file = src.file;
+          if (file.path) {
+            sourceVideoPath = file.path;
+            uploadedPaths.push(file.path);
+          } else {
+            const ext = safeExtFromName(file.originalname, ".mp4");
+            sourceVideoPath = path.join(tempDir, `source_${srcIdx}${ext}`);
+            await fs.writeFile(sourceVideoPath, file.buffer);
+          }
+          if (!projectLabelRaw) {
+            sourceTitle = String(file.originalname || `video_${srcIdx + 1}`).replace(/\.[a-z0-9]+$/i, "");
+          }
+        } else {
+          send({ stage: "download", source: srcIdx + 1, sourceTotal: sources.length, percent: 0, message: `${sourceLabel}: підключення до YouTube...` });
+          const heartbeat = setInterval(() => {
+            send({ stage: "download", source: srcIdx + 1, sourceTotal: sources.length, percent: 0, message: `${sourceLabel}: yt-dlp стартує...` });
+          }, 4000);
+          try {
+            const sourceDir = path.join(tempDir, `yt_${srcIdx}`);
+            await fs.mkdir(sourceDir, { recursive: true });
+            const downloaded = await downloadYouTubeVideo(src.url, sourceDir, (pct) => {
+              send({ stage: "download", source: srcIdx + 1, sourceTotal: sources.length, percent: pct, message: `${sourceLabel}: ${pct.toFixed(1)}%` });
+            });
+            sourceVideoPath = downloaded.videoPath;
+            if (!projectLabelRaw) sourceTitle = downloaded.title;
+          } finally {
+            clearInterval(heartbeat);
+          }
         }
-        usedFileStems.add(fileStem);
-        const finalFilename = `${fileStem}.mp4`;
-        const finalClipPath = path.join(clipsDir, finalFilename);
-        await safeCopyFile(tempClipPath, finalClipPath);
 
-        const previewName = `${fileStem}.jpg`;
-        const previewPath = path.join(previewsDir, previewName);
-        await extractPreviewForClip(finalClipPath, previewPath, Math.min(clipDuration / 2, 1.0)).catch(() => {});
+        send({ stage: "analyze", source: srcIdx + 1, sourceTotal: sources.length, message: `${sourceLabel}: аналіз...` });
+        const duration = await probeMediaDuration(sourceVideoPath).catch(() => 0);
+        if (!duration || duration < 0.5) {
+          send({ stage: "warn", source: srcIdx + 1, message: `${sourceLabel}: не вдалось визначити тривалість, пропускаю` });
+          continue;
+        }
 
-        clips.push({
-          index: index + 1,
-          title: clipTitle,
-          filename: finalFilename,
-          start,
-          end,
-          duration: clipDuration,
-          timeLabel: formatCutTimeLabel(start, end),
-          summary: titleMeta.summary,
-          scoring: titleMeta.scoring,
-          captionSource: titleMeta.scoring?.source || (blip.available && blip.caption ? "blip" : (ocrText ? "ocr" : "source")),
-          blipCaption: blip.caption || "",
-          blipCaptions: Array.isArray(blip.captions) ? blip.captions : [],
-          blipError: blip.error || "",
-          ocrText,
-          url: `/outputs/${folderName}/clips/${finalFilename}`,
-          previewUrl: `/outputs/${folderName}/previews/${previewName}`
+        const isGenericSourceTitle = isGenericSourceName(sourceTitle);
+        const sourceContextDir = path.join(tempDir, `ctx_${srcIdx}`);
+        await fs.mkdir(sourceContextDir, { recursive: true });
+        const sourceFramePaths = await extractFramePathsDeep(sourceVideoPath, sourceContextDir, 3).catch(() => []);
+        const sourceBlip = await describeFramesWithBlip(sourceFramePaths);
+        const sourceOcr = await extractOcrFromVideoFrames(sourceVideoPath, sourceContextDir).catch(() => "");
+        const sourceAnalysisContext = [
+          isGenericSourceTitle ? "" : sourceTitle,
+          sourceBlip.caption,
+          cleanOcrForTitle(sourceOcr)
+        ].filter(Boolean).join(". ");
+        const titleContextBase = sourceAnalysisContext || (isGenericSourceTitle ? "архівний фрагмент відео" : sourceTitle);
+
+        const segmentsToCut = [];
+        for (let start = 0; start < duration - 0.05; start += segmentSeconds) {
+          const end = Math.min(duration, start + segmentSeconds);
+          segmentsToCut.push({
+            index: segmentsToCut.length,
+            start,
+            end,
+            clipDuration: Math.max(0.5, end - start)
+          });
+        }
+
+        send({
+          stage: "cutting",
+          source: srcIdx + 1,
+          sourceTotal: sources.length,
+          clipDone: 0,
+          clipTotal: segmentsToCut.length,
+          message: `${sourceLabel}: нарізаю на ${segmentsToCut.length} кліпів...`
+        });
+        let cutDoneCount = 0;
+        const processedSegments = await mapWithConcurrency(segmentsToCut, cutterConcurrency, async (segment) => {
+          const { index, start, end, clipDuration } = segment;
+          const segmentTempDir = path.join(tempDir, `seg_${srcIdx}_${String(index + 1).padStart(5, "0")}`);
+          await fs.mkdir(segmentTempDir, { recursive: true });
+          const tempClipPath = path.join(segmentTempDir, `clip_${String(index + 1).padStart(4, "0")}.mp4`);
+          await runFfmpeg([
+            "-y",
+            "-ss", String(start),
+            "-i", sourceVideoPath,
+            "-t", String(clipDuration),
+            "-vf", "fps=30,format=yuv420p",
+            ...videoCodecArgs(),
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            tempClipPath
+          ]);
+
+          const ocrText = await extractOcrFromVideoFrames(tempClipPath, segmentTempDir).catch(() => "");
+          const framePaths = await extractFramePathsDeep(tempClipPath, segmentTempDir, 3).catch(() => []);
+          const blip = await describeFramesWithBlip(framePaths);
+          const titleMeta = buildCutTitleAnalysis({
+            baseTitle: titleContextBase,
+            ocrText,
+            blipCaption: blip.caption,
+            blipCaptions: blip.captions,
+            blipError: blip.error,
+            start,
+            end,
+            namingMode
+          });
+          const clipTitle = titleMeta.title;
+          const timeSlug = `${formatCutTimeCompact(start)}_to_${formatCutTimeCompact(end)}`;
+          const baseStem = String(titleMeta.fileSlug || "").trim() || slugifyText(clipTitle, `fragment-${timeSlug}`);
+
+          cutDoneCount += 1;
+          send({
+            stage: "cutting",
+            source: srcIdx + 1,
+            sourceTotal: sources.length,
+            clipDone: cutDoneCount,
+            clipTotal: segmentsToCut.length,
+            message: `${sourceLabel}: ${cutDoneCount}/${segmentsToCut.length} — ${clipTitle.slice(0, 50)}`
+          });
+          return { index, start, end, clipDuration, tempClipPath, clipTitle, timeSlug, baseStem, titleMeta, blip, ocrText };
+        });
+
+        for (const processed of processedSegments.sort((a, b) => a.index - b.index)) {
+          const { start, end, clipDuration, tempClipPath, clipTitle, timeSlug, baseStem, titleMeta, blip, ocrText } = processed;
+          // No src prefix — collisions handled via numeric suffix below.
+          let fileStem = baseStem || `fragment-${timeSlug}`;
+          let suffix = 2;
+          while (usedFileStems.has(fileStem)) {
+            fileStem = `${baseStem || "fragment"}-${suffix}`;
+            suffix += 1;
+          }
+          usedFileStems.add(fileStem);
+          const finalFilename = `${fileStem}.mp4`;
+          const finalClipPath = path.join(clipsDir, finalFilename);
+          await safeCopyFile(tempClipPath, finalClipPath);
+
+          const previewName = `${fileStem}.jpg`;
+          const previewPath = path.join(previewsDir, previewName);
+          await extractPreviewForClip(finalClipPath, previewPath, Math.min(clipDuration / 2, 1.0)).catch(() => {});
+
+          globalClipCounter += 1;
+          allClips.push({
+            index: globalClipCounter,
+            sourceIndex: srcIdx + 1,
+            sourceTitle,
+            title: clipTitle,
+            filename: finalFilename,
+            start,
+            end,
+            duration: clipDuration,
+            timeLabel: formatCutTimeLabel(start, end),
+            summary: titleMeta.summary,
+            scoring: titleMeta.scoring,
+            captionSource: titleMeta.scoring?.source || (blip.available && blip.caption ? "blip" : (ocrText ? "ocr" : "source")),
+            blipCaption: blip.caption || "",
+            blipCaptions: Array.isArray(blip.captions) ? blip.captions : [],
+            blipError: blip.error || "",
+            ocrText,
+            url: `/outputs/${folderName}/clips/${finalFilename}`,
+            previewUrl: `/outputs/${folderName}/previews/${previewName}`
+          });
+        }
+
+        sourcesMeta.push({
+          sourceIndex: srcIdx + 1,
+          sourceType: src.type,
+          sourceTitle,
+          youtubeUrl: src.type === "youtube" ? src.url : undefined,
+          duration,
+          clipsCount: processedSegments.length,
+          sourceAnalysisContext
         });
       }
+
+      const clips = allClips;
 
       const metadata = {
         ok: true,
         projectName: projectSlug,
-        sourceTitle,
-        sourceType: useLocalFile ? "local" : "youtube",
-        youtubeUrl,
-        duration,
+        sources: sourcesMeta,
+        sourceCount: sourcesMeta.length,
         segmentSeconds,
         cutterConcurrency,
         namingMode,
         captionMode,
-        sourceAnalysisContext,
         clipsCount: clips.length,
         folderName,
         folderPath: projectDir,
@@ -6022,11 +7080,13 @@ app.post(
       };
       await fs.writeFile(path.join(projectDir, "metadata.json"), JSON.stringify(metadata, null, 2), "utf8");
 
+      send({ stage: "packaging", message: "Пакую zip-архів..." });
       const bundleFilename = `${folderName}.zip`;
       const bundlePath = path.join(OUTPUT_DIR, bundleFilename);
       await createZipArchive(projectDir, bundlePath);
 
-      return res.json({
+      send({
+        stage: "done",
         ok: true,
         projectName: projectSlug,
         segmentSeconds,
@@ -6040,8 +7100,10 @@ app.post(
         bundleFilename,
         clips
       });
+      res.end();
     } catch (error) {
-      return res.status(500).json({ error: error.message || "Помилка нарізки" });
+      send({ stage: "error", error: error.message || "Помилка нарізки" });
+      try { res.end(); } catch {}
     } finally {
       try {
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -6176,20 +7238,35 @@ app.post(
 const blipInstallState = { running: false, progress: 0, log: [], error: "" };
 
 app.get("/api/blip/status", async (_req, res) => {
-  const { userBlipRoot, userVenvPython } = getBlipPaths();
+  const { userBlipRoot, userVenvPython, devVenvPython } = getBlipPaths();
   let installed = false;
+  let location = userBlipRoot || "(no userData)";
+  let mode = "missing";
+  // Production install in userData wins.
   if (userVenvPython) {
     try {
       await fs.access(userVenvPython);
       installed = true;
-    } catch { /* not installed */ }
+      mode = "user";
+      location = userBlipRoot;
+    } catch { /* not installed in userData */ }
+  }
+  // Fallback: dev .venv-blip (used when running `npm run dev` from the repo).
+  if (!installed && devVenvPython) {
+    try {
+      await fs.access(devVenvPython);
+      installed = true;
+      mode = "dev";
+      location = devVenvPython;
+    } catch { /* nope */ }
   }
   res.json({
     installed,
+    mode,                                  // "user" | "dev" | "missing"
     installing: blipInstallState.running,
     progress: blipInstallState.progress,
     error: blipInstallState.error,
-    location: userBlipRoot || "(dev mode — uses .venv-blip)"
+    location
   });
 });
 
@@ -6275,12 +7352,13 @@ async function installBlipRuntime(onEvent) {
   await fs.mkdir(userBlipRoot, { recursive: true });
   await fs.mkdir(userModelsCache, { recursive: true });
 
-  // 1. Pick python-build-standalone URL (indygreg/python-build-standalone).
-  // These are pre-built CPython distributions with no system dependencies.
-  const PY_VERSION = "3.11.11";
-  const PY_RELEASE = "20250109";
+  // 1. Pick python-build-standalone URL (astral-sh/python-build-standalone).
+  // Pre-built CPython distributions with no system dependencies.
+  // Pinned to 3.12.10 — verified working with torch 2.11 + transformers 5.x
+  // on macOS Sequoia / Tahoe, Windows 10/11, modern Linux.
+  const PY_VERSION = "3.12.10";
+  const PY_RELEASE = "20250409";
   let pyUrl = "";
-  let pyArchive = "tar.gz";
   if (platform === "darwin" && arch === "arm64") {
     pyUrl = `https://github.com/astral-sh/python-build-standalone/releases/download/${PY_RELEASE}/cpython-${PY_VERSION}+${PY_RELEASE}-aarch64-apple-darwin-install_only.tar.gz`;
   } else if (platform === "darwin" && arch === "x64") {
@@ -6305,8 +7383,39 @@ async function installBlipRuntime(onEvent) {
       await fs.writeFile(tarPath, Buffer.from(await resp.arrayBuffer()));
       onEvent({ progress: 15, log: "Розпаковка Python..." });
       await fs.mkdir(pyDir, { recursive: true });
-      await runCommand("tar", ["-xzf", tarPath, "-C", pyDir], { timeoutMs: 180000 });
+
+      // Windows: built-in tar (in System32 since Win10 1803) handles tar.gz.
+      // If unavailable, fall back to PowerShell. Linux/macOS always have tar.
+      if (platform === "win32") {
+        try {
+          await runCommand("tar", ["-xzf", tarPath, "-C", pyDir], { timeoutMs: 180000 });
+        } catch (tarErr) {
+          // Fallback: extract via PowerShell. tar.gz needs gunzip+expand,
+          // PowerShell 5+ doesn't natively gunzip — use .NET GZipStream.
+          onEvent({ progress: 18, log: "tar недоступний, використовую PowerShell..." });
+          const psScript = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$gz = [System.IO.File]::OpenRead("${tarPath.replace(/\\/g, "\\\\")}")
+$dec = New-Object System.IO.Compression.GZipStream($gz, [System.IO.Compression.CompressionMode]::Decompress)
+$tarTmp = "${tarPath.replace(/\.tar\.gz$/, ".tar").replace(/\\/g, "\\\\")}"
+$out = [System.IO.File]::Create($tarTmp)
+$dec.CopyTo($out)
+$out.Close(); $dec.Close(); $gz.Close()
+tar -xf $tarTmp -C "${pyDir.replace(/\\/g, "\\\\")}"
+Remove-Item $tarTmp
+          `.trim();
+          await runCommand("powershell", ["-NoProfile", "-Command", psScript], { timeoutMs: 240000 });
+        }
+      } else {
+        await runCommand("tar", ["-xzf", tarPath, "-C", pyDir], { timeoutMs: 180000 });
+      }
       await fs.unlink(tarPath).catch(() => {});
+
+      // Verify python is actually there.
+      try { await fs.access(pythonBin); } catch {
+        throw new Error(`Python не з'явився після розпаковки за шляхом ${pythonBin}`);
+      }
     });
   }
 
@@ -6353,7 +7462,54 @@ print("OK")
     await runCommand(userVenvPython, ["-c", downloadScript], { timeoutMs: 1200000 });
   });
 
-  onEvent({ progress: 100, log: "Готово! BLIP працює офлайн." });
+  // 6. Pre-fetch CLIP model so embed-based matching works offline.
+  // Without this embed_match.py silently fails and the picker falls back
+  // to bag-of-words token matching (which gives 0.0 scores → random picks).
+  await runStep("Завантаження CLIP-моделі", async () => {
+    onEvent({ progress: 88, log: "Завантаження CLIP моделі (~600MB)..." });
+    const downloadScript = `
+import os
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ["HF_HOME"] = "${userModelsCache.replace(/\\/g, "/")}"
+os.environ["TRANSFORMERS_CACHE"] = "${userModelsCache.replace(/\\/g, "/")}"
+from transformers import CLIPModel, CLIPProcessor
+CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+print("OK")
+`;
+    await runCommand(userVenvPython, ["-c", downloadScript], { timeoutMs: 1200000 });
+  });
+
+  // 7. Final verification — actually load both models offline to confirm
+  // everything works. Without this, install reports success even if a
+  // download silently failed mid-way (partial files in cache).
+  await runStep("Перевірка моделей", async () => {
+    onEvent({ progress: 95, log: "Перевірка що BLIP+CLIP вантажаться офлайн..." });
+    const verifyScript = `
+import os, sys
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["HF_HOME"] = "${userModelsCache.replace(/\\/g, "/")}"
+os.environ["TRANSFORMERS_CACHE"] = "${userModelsCache.replace(/\\/g, "/")}"
+try:
+    from transformers import BlipProcessor, BlipForConditionalGeneration, CLIPProcessor, CLIPModel
+    BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base", local_files_only=True)
+    BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base", local_files_only=True, use_safetensors=True)
+    CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True)
+    CLIPModel.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True)
+    print("VERIFY_OK")
+except Exception as e:
+    print("VERIFY_FAIL:" + str(e), file=sys.stderr)
+    sys.exit(1)
+`;
+    const out = await runCommand(userVenvPython, ["-c", verifyScript], { timeoutMs: 600000 });
+    if (!String(out).includes("VERIFY_OK")) {
+      throw new Error("Перевірка моделей не пройшла. Спробуй Reset BLIP і встановити заново.");
+    }
+  });
+
+  onEvent({ progress: 100, log: "Готово! BLIP + CLIP перевірені і працюють офлайн." });
 }
 
 // Reset endpoint: deletes BLIP runtime so user can retry from scratch.
@@ -6402,6 +7558,15 @@ const host = process.env.HOST || "127.0.0.1";
 
 const server = app.listen(port, host, () => {
   console.log(`Voice Stock Studio running on http://${host}:${port}`);
+  // Pre-warm bundled yt-dlp in background so the first cutter request doesn't
+  // pay the ~16s PyInstaller cold-start. Failure is silent — we'll fall back
+  // to lazy resolve on first real call.
+  setTimeout(() => {
+    ensureYtDlpAvailable()
+      .then(() => runCommand(ytDlpBin, ["--version"], { timeoutMs: 60000 }))
+      .then(() => console.log("[yt-dlp] pre-warm complete:", ytDlpBin))
+      .catch((e) => console.log("[yt-dlp] pre-warm skipped:", e?.message?.slice(0, 100)));
+  }, 500);
 });
 
 server.requestTimeout = 0;
